@@ -22,6 +22,12 @@ die Seite soll aber nicht in Google auftauchen.
 
 `index.html` lokal doppelklicken oder die Live-Adresse öffnen. Fünf Reiter:
 
+- **Passwort** — die Seite und alle Akten sind geschützt. Das Passwort liegt als
+  verschlüsseltes Secret im Cloudflare-Projekt, nicht in diesem Repository.
+- **Bearbeiten** — jede Person lässt sich direkt auf der Seite ändern und speichern;
+  die Änderungen gelten für alle Besucher (die Webseite ist führend). Gespeichert wird
+  in einem Cloudflare-KV-Namespace über `POST /api/data`.
+
 - **Stammbaum** — sieben Reihen von Heinrich Doell (1799) bis Gerhard Janzen; Klick auf
   eine Person öffnet rechts die Akte mit Eltern, Partnern, Kindern, offenen Fragen und Belegen.
 - **Personen** — alle 27 Namen mit Suchfeld.
