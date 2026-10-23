@@ -1,13 +1,20 @@
-/* Bearbeiten direkt im Stammbaum + grafische Ansicht.
-   Lädt zentrale Änderungen von /api/data, legt sie über die gebaute Seite
-   ("die Webseite ist führend") und bietet:
-     - Klick auf Person -> Akte -> "Bearbeiten" (Formular direkt im Panel)
-     - Auswahlfelder für Vater, Mutter, Ehepartner (keine IDs tippen)
-     - Reiter "Grafik": Stammbaum als SVG mit Verbindungslinien
-   Passwort-Gate davor: functions/_middleware.js */
-
+/* Bearbeiten, Grafik-Board und Export für das Familienarchiv Janzen.
+ *
+ *  - Änderungen liegen in Cloudflare KV (KV AHNEN_KV, Schlüssel "daten") und
+ *    überschreiben beim Laden die gebaute Seite ("die Webseite ist führend").
+ *  - Grafik-Board: Personen frei verschieben (Positionen werden gespeichert),
+ *    Verknüpfungen per Ziehen vom Griff unten am Kasten, neue Personen per
+ *    Doppelklick auf die Fläche.
+ *  - Export: GEDCOM (für Ahnenprogramme), CSV (Excel), JSON (Vollsicherung).
+ */
 (function () {
   let webDaten = { personen: {}, geaendert: {} };
+
+  const BOX_B = 176, BOX_H = 62, RAND = 30;
+  const positionen = {};        // id -> {x, y}
+  let modus = "kind";           // "kind" = Eltern-Kind, "ehe" = Partnerschaft
+  let ziehen = null;            // {id, dx, dy}
+  let verbinden = null;         // {von, x, y}
 
   /* ---------- Stil ---------- */
   const stil = document.createElement("style");
@@ -29,11 +36,25 @@
     .status.fehler{color:var(--rot)}
     .neueperson{margin-bottom:12px;padding:7px 14px;border-radius:6px;border:1px dashed var(--linie);
         background:transparent;color:var(--akzent);font-size:13px;cursor:pointer}
-    #grafik{overflow:auto;border:1px solid var(--linie);border-radius:8px;background:var(--karte);padding:8px}
-    #grafik svg{display:block}
-    #grafik .box{cursor:pointer}
-    #grafik .box:hover rect{stroke:var(--akzent);stroke-width:2}
-    .grafikinfo{font-size:12.5px;color:var(--leise);margin:0 0 10px}
+    .boardwerkzeug{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+    .boardwerkzeug button{padding:6px 12px;border-radius:6px;border:1px solid var(--linie);
+        background:var(--karte);color:var(--tinte);font-size:12.5px;cursor:pointer}
+    .boardwerkzeug button.an{border-color:var(--akzent);background:var(--akzent);color:#fff}
+    .boardwerkzeug .hinweis{font-size:12px;color:var(--leise)}
+    #grafik{overflow:auto;border:1px solid var(--linie);border-radius:8px;background:var(--karte);
+        padding:0;height:70vh;min-height:420px;position:relative;touch-action:none}
+    #grafik svg{display:block;touch-action:none}
+    #grafik .box{cursor:grab}
+    #grafik .box:active{cursor:grabbing}
+    #grafik .box:hover rect.haupt{stroke:var(--akzent);stroke-width:2}
+    #grafik .griff{cursor:crosshair;opacity:.55}
+    #grafik .griff:hover{opacity:1}
+    .exportkarte{background:var(--karte);border:1px solid var(--linie);border-radius:8px;padding:18px;
+        max-width:760px;margin-bottom:14px}
+    .exportkarte h3{margin:0 0 6px;font-family:Georgia,serif;font-size:17px}
+    .exportkarte p{margin:0 0 12px;font-size:13px;color:var(--leise)}
+    .exportkarte button{padding:9px 16px;border-radius:6px;border:1px solid var(--akzent);
+        background:var(--akzent);color:#fff;font-size:13.5px;cursor:pointer}
   `;
   document.head.appendChild(stil);
 
@@ -79,8 +100,7 @@
   }
 
   function zahlenAktualisieren() {
-    const werte = { "z-personen": DATA.personen.length,
-                    "z-belege": DATA.befunde.length,
+    const werte = { "z-personen": DATA.personen.length, "z-belege": DATA.befunde.length,
                     "z-dok": DATA.dokumente.length };
     Object.entries(werte).forEach(([id, wert]) => {
       const el = document.getElementById(id);
@@ -91,7 +111,13 @@
   }
 
   /* ---------- Hilfen ---------- */
+  const femaleNamen = new Set(["anna", "helena", "katharina", "maria", "lena", "aganetta",
+    "sara", "sarah", "susan", "susanna", "suzana", "elisabeth", "lisa", "justina", "irene",
+    "irma", "margarete", "margarita", "eva", "emma", "olga", "leah", "marie"]);
+
   function jahresText(p) { return (p.jahr || "?") + "–" + (p.jahr_bis || "?"); }
+  function esc(s) { return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;"); }
+  function istWeiblich(p) { return femaleNamen.has(String(p.vorname || "").toLowerCase()); }
 
   function kinderVon(id) {
     const alle = new Set();
@@ -106,17 +132,24 @@
   }
 
   function auswahlOptionen(ausschluss, gewaehlt) {
-    return DATA.personen
-      .filter(p => !ausschluss.has(p.id))
+    return DATA.personen.filter(p => !ausschluss.has(p.id))
       .sort((a, b) => (reihen[a.id] ?? 0) - (reihen[b.id] ?? 0) ||
                       String(a.name).localeCompare(String(b.name), "de"))
-      .map(p => `<option value="${p.id}"${p.id === gewaehlt ? " selected" : ""}>${p.name} (${jahresText(p)})</option>`)
+      .map(p => `<option value="${p.id}"${p.id === gewaehlt ? " selected" : ""}>${esc(p.name)} (${jahresText(p)})</option>`)
       .join("");
   }
 
-  function wert(id) {
-    const el = document.getElementById(id);
-    return el ? el.value.trim() : "";
+  function wert(id) { const el = document.getElementById(id); return el ? el.value.trim() : ""; }
+
+  async function sendeAPI(daten) {
+    const antwort = await fetch("/api/data", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(daten),
+    });
+    const ergebnis = await antwort.json();
+    if (!antwort.ok || ergebnis.fehler) throw new Error(ergebnis.fehler || antwort.status);
+    webDaten = ergebnis.daten;
+    return ergebnis;
   }
 
   /* ---------- Editor im Detailpanel ---------- */
@@ -130,7 +163,6 @@
     const vater = !istNeu && (p.eltern || [])[0] ? p.eltern[0] : "";
     const mutter = !istNeu && (p.eltern || [])[1] ? p.eltern[1] : "";
     const partner = !istNeu && (p.partner || [])[0] ? p.partner[0] : "";
-    const esc = s => String(s == null ? "" : s).replace(/"/g, "&quot;");
 
     document.getElementById("detail").innerHTML = `
       <h2 style="margin-bottom:2px">${istNeu ? "Neue Person" : esc(p.name)}</h2>
@@ -165,8 +197,7 @@
         </div>
       </div>`;
 
-    document.getElementById("e-speichern").addEventListener("click", () =>
-      speichere(istNeu ? null : p.id));
+    document.getElementById("e-speichern").addEventListener("click", () => speichere(istNeu ? null : p.id));
     document.getElementById("e-abbruch").addEventListener("click", () =>
       istNeu ? zeigePerson("gerhard") : zeigePerson(p.id));
     const loeschen = document.getElementById("e-loeschen");
@@ -185,8 +216,6 @@
     const partner = [wert("e-partner")].filter(Boolean);
     const ziel = id || ("web_" + Date.now().toString(36));
 
-    /* Anzeigename: heiratet jemand in einen anderen Nachnamen ein, bleibt der
-       Geburtsname sichtbar - "Katharina Janzen (geb. Isaak)" statt "Katharina Isaak". */
     let anzeige = `${vorname} ${nachname}`.trim();
     const partnerPerson = partner.length ? byId[partner[0]] : null;
     if (partnerPerson && partnerPerson.nachname && partnerPerson.nachname !== nachname) {
@@ -195,27 +224,15 @@
 
     const felder = {
       vorname, nachname, name: anzeige,
-      jahr: wert("e-jahr") || null,
-      jahr_bis: wert("e-jahr_bis") || null,
-      datum: wert("e-datum"),
-      ort: wert("e-ort"),
-      rolle: wert("e-rolle"),
-      notiz: wert("e-notiz"),
-      offen: wert("e-offen"),
-      eltern, partner,
-      belegt: "Angabe über die Webseite",
+      jahr: wert("e-jahr") || null, jahr_bis: wert("e-jahr_bis") || null,
+      datum: wert("e-datum"), ort: wert("e-ort"), rolle: wert("e-rolle"),
+      notiz: wert("e-notiz"), offen: wert("e-offen"),
+      eltern, partner, belegt: "Angabe über die Webseite",
     };
     status.className = "status";
     status.textContent = "speichert …";
     try {
-      const antwort = await fetch("/api/data", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: ziel, felder }),
-      });
-      const ergebnis = await antwort.json();
-      if (!antwort.ok || !ergebnis.ok) throw new Error(ergebnis.fehler || antwort.status);
-
-      webDaten = ergebnis.daten;
+      await sendeAPI({ id: ziel, felder });
       const vorhanden = byId[ziel];
       if (vorhanden) Object.assign(vorhanden, felder, { web: true });
       else {
@@ -235,40 +252,20 @@
   async function zuruecksetzen(id) {
     if (!confirm("Alle Web-Änderungen an dieser Person verwerfen?")) return;
     try {
-      const antwort = await fetch("/api/data", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ loeschen: id }),
-      });
-      const ergebnis = await antwort.json();
-      if (!antwort.ok) throw new Error(ergebnis.fehler || antwort.status);
-      webDaten = ergebnis.daten;
+      await sendeAPI({ loeschen: id });
       location.reload();
-    } catch (fehler) {
-      alert("Nicht zurückgesetzt: " + fehler.message);
-    }
+    } catch (fehler) { alert("Nicht zurückgesetzt: " + fehler.message); }
   }
 
-  /* ---------- Grafische Ansicht (SVG) ---------- */
-  function baueGrafik() {
-    const behaelter = document.getElementById("grafik");
-    if (!behaelter) return;
+  /* ---------- Grafik-Board ---------- */
+  function autoLayout() {
     const personen = DATA.personen.filter(p => verbunden.has(p.id));
-    if (!personen.length) {
-      behaelter.innerHTML = '<p class="grafikinfo">Keine verbundenen Personen.</p>';
-      return;
-    }
-
-    const BOX_B = 176, BOX_H = 62, LUECKE = 26, REIHE_H = 132, RAND = 24, PAAR = 30;
     const reihenListe = {};
     personen.forEach(p => {
       const r = reihen[p.id] ?? 0;
       (reihenListe[r] = reihenListe[r] || []).push(p);
     });
     const reihenNummern = Object.keys(reihenListe).map(Number).sort((a, b) => a - b);
-
-    const x = {}, y = {}, einheiten = [];
-    let breiteste = 0;
-
     reihenNummern.forEach((r, index) => {
       const inReihe = reihenListe[r];
       const benutzt = new Set();
@@ -280,102 +277,447 @@
         if (partnerId) {
           benutzt.add(p.id); benutzt.add(partnerId);
           gruppen.push([p, byId[partnerId]]);
-        } else {
-          benutzt.add(p.id);
-          gruppen.push([p]);
-        }
+        } else { benutzt.add(p.id); gruppen.push([p]); }
       });
-
-      const elternX = gruppe => {
-        const werte = gruppe.flatMap(p => (p.eltern || []).map(e => x[e])).filter(v => v !== undefined);
-        return werte.length ? werte.reduce((a, b) => a + b, 0) / werte.length : Number.MAX_SAFE_INTEGER;
-      };
-      gruppen.sort((a, b) => elternX(a) - elternX(b));
-
       let links = RAND;
       gruppen.forEach(gruppe => {
         gruppe.forEach((p, i) => {
-          x[p.id] = links + i * (BOX_B + PAAR);
-          y[p.id] = RAND + index * REIHE_H;
+          positionen[p.id] = { x: links + i * (BOX_B + 30), y: RAND + index * 140 };
         });
-        links += gruppe.length * BOX_B + (gruppe.length - 1) * PAAR + LUECKE;
-        einheiten.push({ personen: gruppe });
+        links += gruppe.length * BOX_B + (gruppe.length - 1) * 30 + 30;
       });
-      breiteste = Math.max(breiteste, links);
     });
-
-    const hoehe = RAND * 2 + (reihenNummern.length - 1) * REIHE_H + BOX_H;
-    const teile = [];
-
-    einheiten.filter(e => e.personen.length === 2).forEach(({ personen: [a, b] }) => {
-      const yMitte = y[a.id] + BOX_H / 2;
-      teile.push(`<line x1="${x[a.id] + BOX_B}" y1="${yMitte}" x2="${x[b.id]}" y2="${yMitte}" stroke="#7c2d12" stroke-width="1.6"/>`);
-    });
-
-    personen.forEach(kind => {
-      const eltern = (kind.eltern || []).filter(e => x[e] !== undefined);
-      if (!eltern.length) return;
-      const mitten = eltern.map(e => x[e] + BOX_B / 2);
-      const vonX = mitten.reduce((a, b) => a + b, 0) / mitten.length;
-      const vonY = Math.max(...eltern.map(e => y[e] + BOX_H));
-      const zuX = x[kind.id] + BOX_B / 2;
-      const zuY = y[kind.id];
-      const bus = vonY + (zuY - vonY) / 2;
-      teile.push(`<path d="M ${vonX} ${vonY} L ${vonX} ${bus} L ${zuX} ${bus} L ${zuX} ${zuY}" fill="none" stroke="#bcae95" stroke-width="1.4"/>`);
-    });
-
-    personen.forEach(p => {
-      const px = x[p.id], py = y[p.id];
-      const strich = p.web ? ' stroke-dasharray="4 3"' : "";
-      const fuellung = p.web ? "#f3e4d6" : "#fffdf7";
-      const name = String(p.name).length > 24 ? String(p.name).slice(0, 23) + "…" : String(p.name);
-      teile.push(`
-        <g class="box" data-id="${p.id}">
-          <rect x="${px}" y="${py}" width="${BOX_B}" height="${BOX_H}" rx="7" fill="${fuellung}" stroke="#c9bca3" stroke-width="1.3"${strich}/>
-          <text x="${px + 10}" y="${py + 24}" font-size="12.5" font-weight="600" fill="#2b2620" font-family="Segoe UI,sans-serif">${name.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</text>
-          <text x="${px + 10}" y="${py + 42}" font-size="11.5" fill="#6d6355" font-family="Segoe UI,sans-serif">${jahresText(p)}</text>
-          <text x="${px + 10}" y="${py + 55}" font-size="9.5" fill="#7c2d12" font-family="Segoe UI,sans-serif">${(p.rolle || "").slice(0, 30).replace(/&/g, "&amp;").replace(/</g, "&lt;")}</text>
-        </g>`);
-    });
-
-    const breite = Math.ceil(breiteste + RAND);
-    behaelter.innerHTML =
-      `<p class="grafikinfo">${personen.length} Personen, ${reihenNummern.length} Generationen ·
-        gestrichelt = über die Webseite geändert · Klick öffnet die Akte</p>
-       <svg width="${breite}" height="${hoehe}" viewBox="0 0 ${breite} ${hoehe}">${teile.join("")}</svg>`;
-
-    behaelter.querySelectorAll(".box").forEach(el =>
-      el.addEventListener("click", () => { zeigeTab("baum"); zeigePerson(el.dataset.id); }));
   }
 
-  /* ---------- Reiter "Grafik" + Knopf "neue Person" ---------- */
+  function boardGroesse() {
+    const ids = Object.keys(positionen);
+    if (!ids.length) return { breite: 800, hoehe: 500 };
+    const maxX = Math.max(...ids.map(k => positionen[k].x)) + BOX_B + 80;
+    const maxY = Math.max(...ids.map(k => positionen[k].y)) + BOX_H + 80;
+    return { breite: Math.max(800, maxX), hoehe: Math.max(500, maxY) };
+  }
+
+  function baueGrafik() {
+    const behaelter = document.getElementById("grafik");
+    if (!behaelter) return;
+    const personen = DATA.personen.filter(p => verbunden.has(p.id));
+    if (!personen.length) { behaelter.innerHTML = '<p style="padding:16px">Keine verbundenen Personen.</p>'; return; }
+
+    // Positionen: gespeicherte übernehmen, Rest automatisch
+    let fehlend = false;
+    personen.forEach(p => {
+      if (typeof p.pos_x === "number" && typeof p.pos_y === "number") {
+        positionen[p.id] = { x: p.pos_x, y: p.pos_y };
+      }
+    });
+    if (Object.keys(positionen).length < personen.length) {
+      const vorher = { ...positionen };
+      autoLayout();
+      personen.forEach(p => { if (vorher[p.id]) positionen[p.id] = vorher[p.id]; });
+      fehlend = true;
+    }
+
+    const { breite, hoehe } = boardGroesse();
+    const knoepfe = `
+      <div class="boardwerkzeug">
+        <button id="b-modus-kind" class="${modus === "kind" ? "an" : ""}">Verknüpfen: Eltern → Kind</button>
+        <button id="b-modus-ehe" class="${modus === "ehe" ? "an" : ""}">Verknüpfen: Ehepartner</button>
+        <button id="b-neu">＋ Person auf dem Board</button>
+        <button id="b-reset">Neu anordnen</button>
+        <span class="hinweis">Ziehen = verschieben · Griff unten am Kasten = verknüpfen · Doppelklick auf freie Fläche = neue Person</span>
+        <span id="b-status" class="hinweis"></span>
+      </div>`;
+
+    behaelter.innerHTML = knoepfe +
+      `<svg id="board" width="${breite}" height="${hoehe}" viewBox="0 0 ${breite} ${hoehe}">
+         <rect x="0" y="0" width="${breite}" height="${hoehe}" fill="#fffdf7"/>
+         <g id="linien"></g>
+         <g id="knoten"></g>
+       </svg>`;
+
+    zeichneKnoten();
+    zeichneLinien();
+    verdrahten();
+    if (fehlend) speichereAllePositionen();
+  }
+
+  function zeichneKnoten() {
+    const gruppe = document.getElementById("knoten");
+    if (!gruppe) return;
+    const personen = DATA.personen.filter(p => verbunden.has(p.id) && positionen[p.id]);
+    gruppe.innerHTML = personen.map(p => {
+      const { x, y } = positionen[p.id];
+      const strich = p.web ? ' stroke-dasharray="4 3"' : "";
+      const fuellung = p.web ? "#f3e4d6" : "#fffdf7";
+      const name = String(p.name).length > 23 ? String(p.name).slice(0, 22) + "…" : String(p.name);
+      return `<g class="box" data-id="${p.id}" transform="translate(${x},${y})">
+        <rect class="haupt" x="0" y="0" width="${BOX_B}" height="${BOX_H}" rx="7"
+              fill="${fuellung}" stroke="#c9bca3" stroke-width="1.3"${strich}/>
+        <text x="10" y="23" font-size="12.5" font-weight="600" fill="#2b2620"
+              font-family="Segoe UI,sans-serif">${esc(name)}</text>
+        <text x="10" y="41" font-size="11.5" fill="#6d6355"
+              font-family="Segoe UI,sans-serif">${jahresText(p)}</text>
+        <text x="10" y="55" font-size="9.5" fill="#7c2d12"
+              font-family="Segoe UI,sans-serif">${esc((p.rolle || "").slice(0, 30))}</text>
+        <circle class="griff" cx="${BOX_B / 2}" cy="${BOX_H}" r="7" fill="#7c2d12"/>
+      </g>`;
+    }).join("");
+  }
+
+  function zeichneLinien() {
+    const gruppe = document.getElementById("linien");
+    if (!gruppe) return;
+    const teile = [];
+
+    // Ehe-Linien
+    const gesehen = new Set();
+    DATA.personen.forEach(p => {
+      (p.partner || []).forEach(pid => {
+        if (!positionen[p.id] || !positionen[pid]) return;
+        const schluessel = [p.id, pid].sort().join("|");
+        if (gesehen.has(schluessel)) return;
+        gesehen.add(schluessel);
+        const a = positionen[p.id], b = positionen[pid];
+        const yA = a.y + BOX_H / 2, yB = b.y + BOX_H / 2;
+        if (Math.abs(a.y - b.y) < 4) {
+          const links = Math.min(a.x, b.x) + (a.x < b.x ? BOX_B : 0);
+          const rechts = Math.max(a.x, b.x) + (a.x < b.x ? 0 : BOX_B);
+          teile.push(`<line x1="${links}" y1="${yA}" x2="${rechts}" y2="${yB}" stroke="#7c2d12" stroke-width="1.7"/>`);
+        } else {
+          teile.push(`<line x1="${a.x + BOX_B / 2}" y1="${a.y + BOX_H / 2}" x2="${b.x + BOX_B / 2}" y2="${b.y + BOX_H / 2}" stroke="#7c2d12" stroke-width="1.7" stroke-dasharray="5 3"/>`);
+        }
+      });
+    });
+
+    // Eltern-Kind-Linien
+    DATA.personen.forEach(kind => {
+      const eltern = (kind.eltern || []).filter(e => positionen[e]);
+      if (!eltern.length || !positionen[kind.id]) return;
+      const mitten = eltern.map(e => positionen[e].x + BOX_B / 2);
+      const vonX = mitten.reduce((a, b) => a + b, 0) / mitten.length;
+      const vonY = Math.max(...eltern.map(e => positionen[e].y + BOX_H));
+      const zuX = positionen[kind.id].x + BOX_B / 2;
+      const zuY = positionen[kind.id].y;
+      const bus = vonY + Math.max(14, (zuY - vonY) / 2);
+      teile.push(`<path d="M ${vonX} ${vonY} L ${vonX} ${bus} L ${zuX} ${bus} L ${zuX} ${zuY}"
+        fill="none" stroke="#bcae95" stroke-width="1.5"/>`);
+    });
+
+    if (verbinden) {
+      teile.push(`<line x1="${verbinden.x1}" y1="${verbinden.y1}" x2="${verbinden.x}" y2="${verbinden.y}"
+        stroke="#7c2d12" stroke-width="2" stroke-dasharray="6 4"/>`);
+    }
+    gruppe.innerHTML = teile.join("");
+  }
+
+  function svgPunkt(ev) {
+    const svg = document.getElementById("board");
+    const rechteck = svg.getBoundingClientRect();
+    return { x: ev.clientX - rechteck.left, y: ev.clientY - rechteck.top };
+  }
+
+  function verdrahten() {
+    const svg = document.getElementById("board");
+    if (!svg) return;
+
+    svg.addEventListener("pointerdown", ev => {
+      const griff = ev.target.closest(".griff");
+      const kasten = ev.target.closest(".box");
+      if (griff && kasten) {
+        const id = kasten.dataset.id;
+        const p = positionen[id];
+        verbinden = { von: id, x1: p.x + BOX_B / 2, y1: p.y + BOX_H, x: 0, y: 0 };
+        const punkt = svgPunkt(ev);
+        verbinden.x = punkt.x; verbinden.y = punkt.y;
+        svg.setPointerCapture(ev.pointerId);
+        zeichneLinien();
+        ev.preventDefault();
+        return;
+      }
+      if (kasten) {
+        const id = kasten.dataset.id;
+        const punkt = svgPunkt(ev);
+        ziehen = { id, dx: punkt.x - positionen[id].x, dy: punkt.y - positionen[id].y };
+        svg.setPointerCapture(ev.pointerId);
+        ev.preventDefault();
+      }
+    });
+
+    svg.addEventListener("pointermove", ev => {
+      if (!ziehen && !verbinden) return;
+      const punkt = svgPunkt(ev);
+      if (ziehen) {
+        positionen[ziehen.id] = { x: Math.max(0, punkt.x - ziehen.dx), y: Math.max(0, punkt.y - ziehen.dy) };
+        const knoten = document.querySelector(`.box[data-id="${ziehen.id}"]`);
+        if (knoten) knoten.setAttribute("transform",
+          `translate(${positionen[ziehen.id].x},${positionen[ziehen.id].y})`);
+        zeichneLinien();
+      } else if (verbinden) {
+        verbinden.x = punkt.x; verbinden.y = punkt.y;
+        zeichneLinien();
+      }
+    });
+
+    svg.addEventListener("pointerup", async ev => {
+      if (verbinden) {
+        const ziel = document.elementFromPoint(ev.clientX, ev.clientY)?.closest(".box");
+        const von = verbinden.von;
+        verbinden = null;
+        if (ziel && ziel.dataset.id !== von) {
+          await verknuepfe(von, ziel.dataset.id);
+        } else {
+          zeichneLinien();
+        }
+      }
+      if (ziehen) {
+        const id = ziehen.id;
+        ziehen = null;
+        await speicherePosition(id);
+      }
+    });
+
+    svg.addEventListener("dblclick", async ev => {
+      if (ev.target.closest(".box")) return;
+      const punkt = svgPunkt(ev);
+      await neuePersonBei(punkt.x, punkt.y);
+    });
+  }
+
+  async function verknuepfe(vonId, zuId) {
+    const von = byId[vonId], zu = byId[zuId];
+    const status = document.getElementById("b-status");
+    try {
+      if (modus === "ehe") {
+        const partnerVon = new Set(von.partner || []); partnerVon.add(zuId);
+        const partnerZu = new Set(zu.partner || []); partnerZu.add(vonId);
+        await sendeAPI({ id: vonId, felder: { partner: [...partnerVon] } });
+        await sendeAPI({ id: zuId, felder: { partner: [...partnerZu] } });
+        Object.assign(von, { partner: [...partnerVon], web: true });
+        Object.assign(zu, { partner: [...partnerZu], web: true });
+        if (status) status.textContent = `${von.name} ⇄ ${zu.name} verheiratet`;
+      } else {
+        // von = Elternteil, zu = Kind. Vorhandenen Partner als zweiten Elternteil übernehmen.
+        const partner = (von.partner || []).find(pid => byId[pid]) || null;
+        const eltern = partner ? [vonId, partner] : [vonId];
+        await sendeAPI({ id: zuId, felder: { eltern } });
+        zu.eltern = eltern;
+        zu.web = true;
+        if (status) status.textContent = `${zu.name} ist jetzt Kind von ${von.name}`;
+      }
+      neuRechnen();
+      neuZeichnen();
+      baueGrafik();
+    } catch (fehler) {
+      if (status) status.textContent = "Nicht verknüpft: " + fehler.message;
+    }
+  }
+
+  async function neuePersonBei(x, y) {
+    const id = "web_" + Date.now().toString(36);
+    const felder = {
+      vorname: "Neu", nachname: "Janzen", name: "Neu Janzen",
+      jahr: null, jahr_bis: null, datum: "", ort: "", rolle: "auf dem Board angelegt",
+      notiz: "", offen: "", eltern: [], partner: [],
+      belegt: "Angabe über die Webseite", pos_x: Math.round(x), pos_y: Math.round(y),
+    };
+    try {
+      await sendeAPI({ id, felder });
+      const neu = Object.assign({ id, generation: 0 }, felder, { web: true });
+      DATA.personen.push(neu);
+      byId[id] = neu;
+      positionen[id] = { x: felder.pos_x, y: felder.pos_y };
+      neuRechnen();
+      neuZeichnen();
+      baueGrafik();
+      oeffneEditor(id);
+      zeigeTab("baum");
+    } catch (fehler) { alert("Konnte nicht angelegt werden: " + fehler.message); }
+  }
+
+  async function speicherePosition(id) {
+    const pos = positionen[id];
+    if (!pos) return;
+    try {
+      await sendeAPI({ id, felder: { pos_x: Math.round(pos.x), pos_y: Math.round(pos.y) } });
+      if (byId[id]) Object.assign(byId[id], { pos_x: Math.round(pos.x), pos_y: Math.round(pos.y) });
+    } catch (fehler) { console.warn("Position nicht gespeichert:", fehler); }
+  }
+
+  function speichereAllePositionen() {
+    DATA.personen.forEach(p => {
+      if (positionen[p.id] && (p.pos_x == null || p.pos_y == null)) speicherePosition(p.id);
+    });
+  }
+
+  /* ---------- Export ---------- */
+  const MONATE = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+
+  function gedcomDatum(p) {
+    const datum = String(p.datum || "").trim();
+    const treffer = datum.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/);
+    if (treffer) return `${parseInt(treffer[1], 10)} ${MONATE[parseInt(treffer[2], 10) - 1]} ${treffer[3]}`;
+    if (p.jahr) return String(p.jahr);
+    return "";
+  }
+
+  function gedcomText() {
+    const personen = DATA.personen.slice();
+    const nummern = {};
+    personen.forEach((p, i) => { nummern[p.id] = "I" + (i + 1); });
+
+    const familien = new Map();
+    const eintrag = eltern => {
+      const schluessel = eltern.slice().sort().join("|");
+      if (!familien.has(schluessel)) familien.set(schluessel, { eltern: [...eltern].sort(), kinder: [] });
+      return familien.get(schluessel);
+    };
+    personen.forEach(p => {
+      const el = (p.eltern || []).filter(e => byId[e]);
+      if (el.length) eintrag(el).kinder.push(p.id);
+    });
+    personen.forEach(p => (p.partner || []).filter(x => byId[x]).forEach(x => eintrag([p.id, x])));
+    const famNummern = new Map();
+    [...familien.keys()].forEach((k, i) => famNummern.set(k, "F" + (i + 1)));
+
+    const heute = new Date();
+    const zeilen = ["0 HEAD", "1 SOUR Familienarchiv Janzen", "1 GEDC", "2 VERS 5.5.1",
+                    "2 FORM LINEAGE-LINKED", "1 CHAR UTF-8",
+                    `1 DATE ${heute.getDate()} ${MONATE[heute.getMonth()]} ${heute.getFullYear()}`];
+    if (DATA.stand) zeilen.push("1 NOTE Stand " + DATA.stand);
+
+    personen.forEach(p => {
+      zeilen.push(`0 @${nummern[p.id]}@ INDI`);
+      zeilen.push(`1 NAME ${p.vorname || ""} /${p.nachname || ""}/`.trim());
+      if (p.vorname || p.nachname) zeilen.push(`1 SEX ${istWeiblich(p) ? "F" : "M"}`);
+      const geburt = gedcomDatum(p);
+      if (geburt || p.ort) {
+        zeilen.push("1 BIRT");
+        if (geburt) zeilen.push("2 DATE " + geburt);
+        if (p.ort) zeilen.push("2 PLAC " + p.ort);
+      }
+      if (p.jahr_bis) { zeilen.push("1 DEAT"); zeilen.push("2 DATE " + p.jahr_bis); }
+      else if (!p.jahr && p.jahr_bis === null) { /* unbekannt */ }
+      if (p.rolle) zeilen.push("1 OCCU " + p.rolle);
+      if (p.notiz) zeilen.push("1 NOTE " + String(p.notiz).replace(/\n/g, " "));
+      if (Array.isArray(p.offen) && p.offen.length) zeilen.push("1 NOTE Offen: " + p.offen.join("; "));
+      if (p.belegt) zeilen.push("1 NOTE Quelle: " + p.belegt);
+
+      familien.forEach((fam, schluessel) => {
+        if (fam.kinder.includes(p.id)) zeilen.push("1 FAMC @" + famNummern.get(schluessel) + "@");
+        if (fam.eltern.includes(p.id)) zeilen.push("1 FAMS @" + famNummern.get(schluessel) + "@");
+      });
+    });
+
+    familien.forEach((fam, schluessel) => {
+      zeilen.push(`0 @${famNummern.get(schluessel)}@ FAM`);
+      const [a, b] = fam.eltern;
+      if (a && byId[a]) zeilen.push(`1 ${istWeiblich(byId[a]) ? "WIFE" : "HUSB"} @${nummern[a]}@`);
+      if (b && byId[b]) zeilen.push(`1 ${istWeiblich(byId[b]) ? "WIFE" : "HUSB"} @${nummern[b]}@`);
+      fam.kinder.forEach(k => zeilen.push(`1 CHIL @${nummern[k]}@`));
+    });
+
+    zeilen.push("0 TRLR");
+    return zeilen.join("\n");
+  }
+
+  function csvText() {
+    const spalten = ["id", "name", "vorname", "nachname", "jahr", "jahr_bis", "datum",
+                     "ort", "rolle", "eltern", "partner", "belegt", "notiz"];
+    const quote = s => `"${String(s == null ? "" : s).replace(/"/g, '""')}"`;
+    const zeilen = [spalten.join(";")];
+    DATA.personen.forEach(p => {
+      zeilen.push(spalten.map(f => {
+        const wert = p[f];
+        if (Array.isArray(wert)) return quote(wert.join(", "));
+        return quote(wert);
+      }).join(";"));
+    });
+    return "\ufeff" + zeilen.join("\r\n");
+  }
+
+  function jsonText() {
+    return JSON.stringify({
+      familie: DATA.familie, region: DATA.region, stand: DATA.stand,
+      exportiert: new Date().toISOString(),
+      personen: DATA.personen, befunde: DATA.befunde, dokumente: DATA.dokumente,
+    }, null, 1);
+  }
+
+  function herunterladen(name, inhalt, typ) {
+    const blob = new Blob([inhalt], { type: typ });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+  }
+
+  function exportDatum() { return new Date().toISOString().slice(0, 10); }
+
+  function baueExportBereich() {
+    const bereich = document.createElement("section");
+    bereich.id = "tab-export";
+    bereich.className = "versteckt";
+    bereich.innerHTML = `
+      <div class="exportkarte">
+        <h3>GEDCOM (.ged)</h3>
+        <p>Standardformat für Ahnenprogramme: GRAMPS, MyHeritage, Ancestry, FamilySearch,
+           MacFamilyTree. Enthält Personen, Geburt/Tod, Orte, Familien und Notizen.</p>
+        <button id="x-ged">GEDCOM herunterladen</button>
+      </div>
+      <div class="exportkarte">
+        <h3>CSV (.csv)</h3>
+        <p>Tabelle für Excel oder Numbers — alle Personen mit Jahren, Orten, Eltern- und
+           Partner-IDs. Semikolon als Trennzeichen, UTF-8 mit BOM.</p>
+        <button id="x-csv">CSV herunterladen</button>
+      </div>
+      <div class="exportkarte">
+        <h3>JSON (.json)</h3>
+        <p>Vollsicherung: Personen, Belege mit Quellen und Zitaten, Dokumentenliste.
+           Damit lässt sich das Archiv vollständig wiederherstellen.</p>
+        <button id="x-json">JSON herunterladen</button>
+      </div>`;
+    document.querySelector("main").appendChild(bereich);
+
+    document.getElementById("x-ged").addEventListener("click", () =>
+      herunterladen(`familienarchiv-janzen-${exportDatum()}.ged`, gedcomText(), "text/plain;charset=utf-8"));
+    document.getElementById("x-csv").addEventListener("click", () =>
+      herunterladen(`familienarchiv-janzen-${exportDatum()}.csv`, csvText(), "text/csv;charset=utf-8"));
+    document.getElementById("x-json").addEventListener("click", () =>
+      herunterladen(`familienarchiv-janzen-${exportDatum()}.json`, jsonText(), "application/json;charset=utf-8"));
+  }
+
+  /* ---------- Reiter ---------- */
   function baueReiter() {
     const nav = document.querySelector("nav");
     if (!nav || document.getElementById("knopf-grafik")) return;
+    const bereiche = [["grafik", "Grafik"], ["export", "Export"]];
 
-    const knopf = document.createElement("button");
-    knopf.id = "knopf-grafik";
-    knopf.dataset.tab = "grafik";
-    knopf.textContent = "Grafik";
-    knopf.addEventListener("click", () => {
-      document.querySelectorAll("main > section").forEach(s => s.classList.add("versteckt"));
-      document.getElementById("tab-grafik").classList.remove("versteckt");
-      document.querySelectorAll("nav button").forEach(b => b.classList.remove("aktiv"));
-      knopf.classList.add("aktiv");
-      baueGrafik();
+    bereiche.forEach(([schlüssel, titel]) => {
+      const knopf = document.createElement("button");
+      knopf.id = "knopf-" + schlüssel;
+      knopf.dataset.tab = schlüssel;
+      knopf.textContent = titel;
+      knopf.addEventListener("click", () => {
+        document.querySelectorAll("main > section").forEach(s => s.classList.add("versteckt"));
+        document.getElementById("tab-" + schlüssel).classList.remove("versteckt");
+        document.querySelectorAll("nav button").forEach(b => b.classList.remove("aktiv"));
+        knopf.classList.add("aktiv");
+        if (schlüssel === "grafik") baueGrafik();
+      });
+      nav.appendChild(knopf);
+      document.querySelectorAll("nav button").forEach(b => {
+        if (b !== knopf) b.addEventListener("click", () =>
+          document.getElementById("tab-" + schlüssel)?.classList.add("versteckt"));
+      });
     });
-    nav.appendChild(knopf);
 
-    document.querySelectorAll("nav button").forEach(b => {
-      if (b !== knopf) b.addEventListener("click", () =>
-        document.getElementById("tab-grafik").classList.add("versteckt"));
-    });
-
-    const bereich = document.createElement("section");
-    bereich.id = "tab-grafik";
-    bereich.className = "versteckt";
-    bereich.innerHTML = `<div id="grafik"></div>`;
-    document.querySelector("main").appendChild(bereich);
+    const grafik = document.createElement("section");
+    grafik.id = "tab-grafik";
+    grafik.className = "versteckt";
+    grafik.innerHTML = `<div id="grafik"></div>`;
+    document.querySelector("main").appendChild(grafik);
+    baueExportBereich();
 
     const baum = document.getElementById("baum");
     if (baum && !document.getElementById("knopf-neu")) {
@@ -392,6 +734,25 @@
   ladeWebDaten().then(() => {
     baueReiter();
     neuZeichnen();
+
+    // Werkzeugleiste des Boards nach jedem Aufbau verdrahten
+    document.addEventListener("click", ev => {
+      if (ev.target.id === "b-modus-kind" || ev.target.id === "b-modus-ehe") {
+        modus = ev.target.id === "b-modus-kind" ? "kind" : "ehe";
+        baueGrafik();
+      }
+      if (ev.target.id === "b-neu") {
+        const { breite, hoehe } = boardGroesse();
+        neuePersonBei(Math.round(breite / 2 - BOX_B / 2), Math.round(hoehe / 2 - BOX_H / 2));
+      }
+      if (ev.target.id === "b-reset") {
+        Object.keys(positionen).forEach(k => delete positionen[k]);
+        autoLayout();
+        zeichneKnoten(); zeichneLinien();
+        speichereAllePositionen();
+      }
+    });
+
     const detail = document.getElementById("detail");
     if (detail) {
       detail.addEventListener("click", ev => {

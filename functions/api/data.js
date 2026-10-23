@@ -21,15 +21,16 @@ function json(obj, status = 200) {
 }
 
 const ERLAUBT = ["name", "vorname", "nachname", "jahr", "jahr_bis", "datum", "ort",
-                 "rolle", "notiz", "belegt", "offen", "eltern", "partner", "kandidaten"];
+                 "rolle", "notiz", "belegt", "offen", "eltern", "partner", "kandidaten",
+                 "pos_x", "pos_y"];
 
 function aufraeumen(quelle) {
   const ziel = {};
   for (const feld of ERLAUBT) {
     if (!(feld in (quelle || {}))) continue;
     let wert = quelle[feld];
-    if (feld === "jahr" || feld === "jahr_bis") {
-      wert = wert === "" || wert === null ? null : parseInt(wert, 10);
+    if (feld === "jahr" || feld === "jahr_bis" || feld === "pos_x" || feld === "pos_y") {
+      wert = wert === "" || wert === null ? null : Number(wert);
       if (Number.isNaN(wert)) wert = null;
     }
     if (feld === "offen" || feld === "kandidaten") {
