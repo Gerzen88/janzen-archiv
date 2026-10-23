@@ -112,6 +112,8 @@
     try { bauePersonen(); } catch (e) { console.warn(e); }
     try { baueZeit(); } catch (e) { console.warn(e); }
     try { baueGrafik(); } catch (e) { console.warn(e); }
+    try { fuelleStartListe(); if (baumModus !== "generationen") zeichnePedigree(); }
+    catch (e) { console.warn(e); }
     zahlenAktualisieren();
   }
 
@@ -982,7 +984,218 @@
     });
   }
 
-  /* ---------- Export ---------- */
+  /* ---------- Vorfahren- und Nachkommen-Ansicht ---------- */
+  let baumModus = "generationen";     // generationen | vorfahren | nachkommen
+  let startPerson = "gerhard";
+  let ahnenTiefe = 3;
+  const ahnenVerlauf = [];
+
+  function baueStammbaumModi() {
+    const baum = document.getElementById("baum");
+    if (!baum || document.getElementById("stammbaum-modi")) return;
+
+    const leiste = document.createElement("div");
+    leiste.id = "stammbaum-modi";
+    leiste.className = "boardwerkzeug";
+    leiste.innerHTML = `
+      <button data-modus="generationen" class="an">Generationen</button>
+      <button data-modus="vorfahren">Vorfahren</button>
+      <button data-modus="nachkommen">Nachkommen</button>
+      <span class="hinweis">Startperson</span>
+      <select id="p-start" style="padding:5px 8px;border:1px solid var(--linie);border-radius:6px;
+        background:var(--karte);font-size:12.5px;max-width:220px"></select>
+      <span class="hinweis">Tiefe</span>
+      <select id="p-tiefe" style="padding:5px 8px;border:1px solid var(--linie);border-radius:6px;
+        background:var(--karte);font-size:12.5px">
+        <option value="2">2</option><option value="3" selected>3</option>
+        <option value="4">4</option><option value="5">5</option>
+      </select>
+      <button id="p-zurueck">↶ zurück</button>
+      <button id="p-board">Im Board zeigen</button>
+      <span id="p-status" class="hinweis"></span>`;
+
+    const pedigree = document.createElement("div");
+    pedigree.id = "pedigree";
+    pedigree.className = "versteckt";
+    pedigree.style.cssText = "overflow:auto;border:1px solid var(--linie);border-radius:8px;" +
+      "background:var(--karte);padding:10px;min-height:420px";
+
+    baum.parentNode.insertBefore(leiste, baum);
+    baum.parentNode.insertBefore(pedigree, baum.nextSibling);
+
+    fuelleStartListe();
+    document.getElementById("p-start").addEventListener("change", ev => {
+      startPerson = ev.target.value;
+      ahnenVerlauf.length = 0;
+      zeichnePedigree();
+    });
+    document.getElementById("p-tiefe").addEventListener("change", ev => {
+      ahnenTiefe = parseInt(ev.target.value, 10);
+      zeichnePedigree();
+    });
+    leiste.querySelectorAll("[data-modus]").forEach(knopf => {
+      knopf.addEventListener("click", () => setzeBaumModus(knopf.dataset.modus));
+    });
+    document.getElementById("p-zurueck").addEventListener("click", () => {
+      if (!ahnenVerlauf.length) { meldungPedigree("kein Schritt zurück"); return; }
+      startPerson = ahnenVerlauf.pop();
+      document.getElementById("p-start").value = startPerson;
+      zeichnePedigree();
+    });
+    document.getElementById("p-board").addEventListener("click", () => {
+      zeigeBereich("board");
+      baueGrafik();
+      const pos = positionen[startPerson];
+      if (pos) {
+        const svg = document.getElementById("board");
+        const r = svg.getBoundingClientRect();
+        ansicht.x = pos.x + BOX_B / 2 - (r.width / ansicht.zoom) / 2;
+        ansicht.y = pos.y + BOX_H / 2 - (r.height / ansicht.zoom) / 2;
+        zeichneAnsicht();
+      }
+      meldung(`${byId[startPerson]?.name || startPerson} im Board gezeigt`);
+    });
+  }
+
+  function meldungPedigree(text) {
+    const el = document.getElementById("p-status");
+    if (el) el.textContent = text;
+  }
+
+  /* Bereiche umschalten - auch für Reiter, die das Original-zeigeTab() nicht kennt */
+  function zeigeBereich(name) {
+    document.querySelectorAll("main > section").forEach(s => s.classList.add("versteckt"));
+    document.getElementById("tab-" + name)?.classList.remove("versteckt");
+    document.querySelectorAll("nav button").forEach(b =>
+      b.classList.toggle("aktiv", b.dataset.tab === name));
+  }
+
+  function fuelleStartListe() {
+    const auswahl = document.getElementById("p-start");
+    if (!auswahl) return;
+    const personen = DATA.personen.slice().sort((a, b) =>
+      String(a.name).localeCompare(String(b.name), "de"));
+    auswahl.innerHTML = personen.map(p =>
+      `<option value="${p.id}"${p.id === startPerson ? " selected" : ""}>${esc(p.name)} (${jahresText(p)})</option>`)
+      .join("");
+    if (!personen.some(p => p.id === startPerson) && personen.length) startPerson = personen[0].id;
+    auswahl.value = startPerson;
+  }
+
+  function setzeBaumModus(modus) {
+    baumModus = modus;
+    const leiste = document.getElementById("stammbaum-modi");
+    leiste?.querySelectorAll("[data-modus]").forEach(b =>
+      b.classList.toggle("an", b.dataset.modus === modus));
+    const generationsWerkzeug = document.getElementById("knopf-neu");
+    if (modus === "generationen") {
+      document.getElementById("baum")?.classList.remove("versteckt");
+      document.getElementById("pedigree")?.classList.add("versteckt");
+      if (generationsWerkzeug) generationsWerkzeug.classList.remove("versteckt");
+      baueBaum();
+    } else {
+      document.getElementById("baum")?.classList.add("versteckt");
+      document.getElementById("fremd-wrap")?.classList.add("versteckt");
+      document.getElementById("pedigree")?.classList.remove("versteckt");
+      if (generationsWerkzeug) generationsWerkzeug.classList.add("versteckt");
+      zeichnePedigree();
+    }
+  }
+
+  function elternVon(id) { return (byId[id]?.eltern || []).filter(e => byId[e]); }
+  function kinderVonPerson(id) {
+    return DATA.personen.filter(p => (p.eltern || []).includes(id)).map(p => p.id);
+  }
+
+  function zeichnePedigree() {
+    const behaelter = document.getElementById("pedigree");
+    if (!behaelter) return;
+    if (!byId[startPerson]) { behaelter.innerHTML = '<p class="hinweis" style="padding:12px">Person wählen.</p>'; return; }
+
+    const B = 168, H = 56, LUECKE = 26, REIHE = 116;
+    const richtung = baumModus === "nachkommen" ? "ab" : "auf";
+    const nachbarn = id => richtung === "auf" ? elternVon(id) : kinderVonPerson(id);
+
+    const messCache = new Map();
+    const messen = (id, gen) => {
+      const schluessel = id + "@" + gen;
+      if (messCache.has(schluessel)) return messCache.get(schluessel);
+      const weiter = gen < ahnenTiefe ? nachbarn(id) : [];
+      let breite = B;
+      if (weiter.length) {
+        const teile = weiter.map(k => messen(k, gen + 1));
+        breite = Math.max(B, teile.reduce((a, b) => a + b, 0) + LUECKE * (weiter.length - 1));
+      }
+      messCache.set(schluessel, breite);
+      return breite;
+    };
+
+    const knoten = [], kanten = [];
+    const setzen = (id, gen, links) => {
+      const breite = messen(id, gen);
+      const x = links + breite / 2 - B / 2;
+      const y = richtung === "auf" ? (ahnenTiefe - gen) * REIHE : gen * REIHE;
+      knoten.push({ id, x, y, gen });
+      const weiter = gen < ahnenTiefe ? nachbarn(id) : [];
+      if (!weiter.length) return;
+      const teile = weiter.map(k => messen(k, gen + 1));
+      const gesamt = teile.reduce((a, b) => a + b, 0) + LUECKE * (weiter.length - 1);
+      let start = links + (breite - gesamt) / 2;
+      const kindMitte = x + B / 2;
+      weiter.forEach((k, i) => {
+        setzen(k, gen + 1, start);
+        const kN = knoten[knoten.length - 1];
+        const elternMitte = kN.x + B / 2;
+        const yVon = richtung === "auf" ? kN.y + H : kN.y;
+        const yZu = richtung === "auf" ? y : y + H;
+        const bus = yVon + (yZu - yVon) / 2;
+        kanten.push(`M ${elternMitte} ${yVon} L ${elternMitte} ${bus} L ${kindMitte} ${bus} L ${kindMitte} ${yZu}`);
+        start += teile[i] + LUECKE;
+      });
+    };
+
+    const gesamtBreite = messen(startPerson, 0);
+    setzen(startPerson, 0, 0);
+    const breite = gesamtBreite + 80;
+    const hoehe = (ahnenTiefe + 1) * REIHE + H;
+
+    const kaesten = knoten.map(k => {
+      const person = byId[k.id];
+      const zentral = k.id === startPerson;
+      const name = String(person.name).length > 22 ? String(person.name).slice(0, 21) + "…" : String(person.name);
+      return `<g class="pbox" data-id="${k.id}" style="cursor:pointer">
+        <rect x="${k.x}" y="${k.y}" width="${B}" height="${H}" rx="7"
+          fill="${zentral ? "#f3e4d6" : "#fffdf7"}"
+          stroke="${zentral ? "#7c2d12" : "#c9bca3"}" stroke-width="${zentral ? 2 : 1.2}"/>
+        <text x="${k.x + 9}" y="${k.y + 22}" font-size="12" font-weight="600" fill="#2b2620"
+          font-family="Segoe UI,sans-serif">${esc(name)}</text>
+        <text x="${k.x + 9}" y="${k.y + 38}" font-size="11" fill="#6d6355"
+          font-family="Segoe UI,sans-serif">${jahresText(person)}</text>
+        <text x="${k.x + 9}" y="${k.y + 50}" font-size="9" fill="#7c2d12"
+          font-family="Segoe UI,sans-serif">${esc((person.rolle || "").slice(0, 28))}</text>
+      </g>`;
+    }).join("");
+
+    const linien = kanten.map(d =>
+      `<path d="${d}" fill="none" stroke="#bcae95" stroke-width="1.4"/>`).join("");
+
+    behaelter.innerHTML =
+      `<p class="hinweis" style="margin:0 0 8px">${richtung === "auf" ? "Vorfahren" : "Nachkommen"} von
+        ${esc(byId[startPerson].name)} · ${ahnenTiefe} Generationen · ${knoten.length} Personen ·
+        Klick auf eine Person setzt sie als Startpunkt</p>
+       <svg width="${breite}" height="${hoehe}" viewBox="0 0 ${breite} ${hoehe}">
+         ${linien}${kaesten}
+       </svg>`;
+
+    behaelter.querySelectorAll(".pbox").forEach(el =>
+      el.addEventListener("click", () => {
+        ahnenVerlauf.push(startPerson);
+        startPerson = el.dataset.id;
+        document.getElementById("p-start").value = startPerson;
+        zeichnePedigree();
+      }));
+    meldungPedigree(`${knoten.length} Personen dargestellt`);
+  }
   const MONATE = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
 
   function gedcomDatum(p) {
@@ -1166,6 +1379,7 @@
   /* ---------- Start ---------- */
   ladeWebDaten().then(() => {
     baueReiter();
+    baueStammbaumModi();
     neuZeichnen();
 
     // Werkzeugleiste des Boards
