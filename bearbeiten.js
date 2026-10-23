@@ -11,10 +11,14 @@
   let webDaten = { personen: {}, geaendert: {} };
 
   const BOX_B = 176, BOX_H = 62, RAND = 30;
-  const positionen = {};        // id -> {x, y}
+  const positionen = {};        // id -> {x, y}, Weltkoordinaten (auch negativ)
   let modus = "kind";           // "kind" = Eltern-Kind, "ehe" = Partnerschaft
   let ziehen = null;            // {id, dx, dy}
   let verbinden = null;         // {von, x, y}
+  let schieben = null;          // {sx, sy, x0, y0} - Fläche verschieben
+  let ansicht = { x: -200, y: -150, zoom: 1 };
+  let ansichtGesetzt = false;
+  const verlauf = [];           // Rückgängig-Stapel
 
   /* ---------- Stil ---------- */
   const stil = document.createElement("style");
@@ -41,14 +45,18 @@
         background:var(--karte);color:var(--tinte);font-size:12.5px;cursor:pointer}
     .boardwerkzeug button.an{border-color:var(--akzent);background:var(--akzent);color:#fff}
     .boardwerkzeug .hinweis{font-size:12px;color:var(--leise)}
-    #grafik{overflow:auto;border:1px solid var(--linie);border-radius:8px;background:var(--karte);
-        padding:0;height:70vh;min-height:420px;position:relative;touch-action:none}
-    #grafik svg{display:block;touch-action:none}
+    #grafik{overflow:hidden;border:1px solid var(--linie);border-radius:8px;background:var(--karte);
+        padding:0;height:72vh;min-height:460px;position:relative;touch-action:none}
+    #board{width:100%;height:100%;display:block;background:#fffdf7;touch-action:none;cursor:grab}
+    #board.schiebend{cursor:grabbing}
     #grafik .box{cursor:grab}
     #grafik .box:active{cursor:grabbing}
     #grafik .box:hover rect.haupt{stroke:var(--akzent);stroke-width:2}
-    #grafik .griff{cursor:crosshair;opacity:.55}
+    #grafik .griff{cursor:crosshair;opacity:.5}
     #grafik .griff:hover{opacity:1}
+    #grafik .treffer{pointer-events:stroke;cursor:pointer}
+    #grafik .treffer:hover + .sichtbar{stroke:#8c2f2f;stroke-width:2.4}
+    .zoomanzeige{font-size:11.5px;color:var(--leise);min-width:44px;text-align:center}
     .exportkarte{background:var(--karte);border:1px solid var(--linie);border-radius:8px;padding:18px;
         max-width:760px;margin-bottom:14px}
     .exportkarte h3{margin:0 0 6px;font-family:Georgia,serif;font-size:17px}
@@ -321,28 +329,103 @@
       fehlend = true;
     }
 
-    const { breite, hoehe } = boardGroesse();
-    const knoepfe = `
+    const werkzeug = `
       <div class="boardwerkzeug">
         <button id="b-modus-kind" class="${modus === "kind" ? "an" : ""}">Verknüpfen: Eltern → Kind</button>
         <button id="b-modus-ehe" class="${modus === "ehe" ? "an" : ""}">Verknüpfen: Ehepartner</button>
-        <button id="b-neu">＋ Person auf dem Board</button>
+        <button id="b-neu">＋ Person</button>
+        <button id="b-undo">↶ Rückgängig</button>
+        <button id="b-jetzt">Aktuelle Generation</button>
         <button id="b-reset">Neu anordnen</button>
-        <span class="hinweis">Ziehen = verschieben · Griff unten am Kasten = verknüpfen · Doppelklick auf freie Fläche = neue Person</span>
+        <button id="b-zoom-out">−</button>
+        <span class="zoomanzeige" id="b-zoom">100 %</span>
+        <button id="b-zoom-in">+</button>
+        <span class="hinweis">Fläche ziehen = verschieben · Rad = zoomen · Griff unten = verknüpfen · Linie anklicken = löschen · Doppelklick = neue Person</span>
         <span id="b-status" class="hinweis"></span>
       </div>`;
 
-    behaelter.innerHTML = knoepfe +
-      `<svg id="board" width="${breite}" height="${hoehe}" viewBox="0 0 ${breite} ${hoehe}">
-         <rect x="0" y="0" width="${breite}" height="${hoehe}" fill="#fffdf7"/>
-         <g id="linien"></g>
-         <g id="knoten"></g>
-       </svg>`;
-
+    behaelter.innerHTML = werkzeug +
+      `<svg id="board"><g id="linien"></g><g id="knoten"></g></svg>`;
     zeichneKnoten();
     zeichneLinien();
     verdrahten();
+    if (!ansichtGesetzt) { zeigeAktuelleGeneration(); ansichtGesetzt = true; }
+    else zeichneAnsicht();
+    aktualisiereWerkzeug();
     if (fehlend) speichereAllePositionen();
+  }
+
+  function zeichneAnsicht() {
+    const svg = document.getElementById("board");
+    if (!svg) return;
+    const rechteck = svg.getBoundingClientRect();
+    const breite = Math.max(120, rechteck.width) / ansicht.zoom;
+    const hoehe = Math.max(120, rechteck.height) / ansicht.zoom;
+    svg.setAttribute("viewBox", `${ansicht.x} ${ansicht.y} ${breite} ${hoehe}`);
+    const anzeige = document.getElementById("b-zoom");
+    if (anzeige) anzeige.textContent = Math.round(ansicht.zoom * 100) + " %";
+  }
+
+  function weltPunkt(ev) {
+    const svg = document.getElementById("board");
+    const rechteck = svg.getBoundingClientRect();
+    return {
+      x: ansicht.x + (ev.clientX - rechteck.left) / ansicht.zoom,
+      y: ansicht.y + (ev.clientY - rechteck.top) / ansicht.zoom,
+    };
+  }
+
+  /* Start beim Öffnen: die jüngste (aktuelle) Generation mittig zeigen */
+  function zeigeAktuelleGeneration() {
+    const svg = document.getElementById("board");
+    if (!svg) return;
+    const personen = DATA.personen.filter(p => verbunden.has(p.id) && positionen[p.id]);
+    if (!personen.length) return;
+    const maxReihe = Math.max(...personen.map(p => reihen[p.id] ?? 0));
+    const aktuell = personen.filter(p => (reihen[p.id] ?? 0) === maxReihe);
+    const minX = Math.min(...aktuell.map(p => positionen[p.id].x));
+    const maxX = Math.max(...aktuell.map(p => positionen[p.id].x + BOX_B));
+    const minY = Math.min(...aktuell.map(p => positionen[p.id].y));
+    const maxY = Math.max(...aktuell.map(p => positionen[p.id].y + BOX_H));
+    const rechteck = svg.getBoundingClientRect();
+    const sichtbarBreit = Math.max(120, rechteck.width) / ansicht.zoom;
+    const sichtbarHoch = Math.max(120, rechteck.height) / ansicht.zoom;
+    ansicht.x = (minX + maxX) / 2 - sichtbarBreit / 2;
+    ansicht.y = (minY + maxY) / 2 - sichtbarHoch / 2;
+    zeichneAnsicht();
+  }
+
+  function zoome(faktor, anker) {
+    const neu = Math.min(2.6, Math.max(0.25, ansicht.zoom * faktor));
+    if (neu === ansicht.zoom) return;
+    const svg = document.getElementById("board");
+    const rechteck = svg.getBoundingClientRect();
+    const punkt = anker || { x: rechteck.width / 2, y: rechteck.height / 2 };
+    const weltX = ansicht.x + punkt.x / ansicht.zoom;
+    const weltY = ansicht.y + punkt.y / ansicht.zoom;
+    ansicht.zoom = neu;
+    ansicht.x = weltX - punkt.x / neu;
+    ansicht.y = weltY - punkt.y / neu;
+    zeichneAnsicht();
+  }
+
+  function aktualisiereWerkzeug() {
+    const knopf = document.getElementById("b-undo");
+    if (knopf) {
+      knopf.disabled = !verlauf.length;
+      knopf.style.opacity = verlauf.length ? "1" : ".45";
+      knopf.textContent = verlauf.length
+        ? `↶ Rückgängig (${verlauf.length})` : "↶ Rückgängig";
+    }
+    const status = document.getElementById("b-status");
+    if (status && !status.textContent) status.textContent = "";
+    const z = document.getElementById("b-zoom");
+    if (z) z.textContent = Math.round(ansicht.zoom * 100) + " %";
+  }
+
+  function meldung(text) {
+    const status = document.getElementById("b-status");
+    if (status) status.textContent = text;
   }
 
   function zeichneKnoten() {
@@ -373,7 +456,7 @@
     if (!gruppe) return;
     const teile = [];
 
-    // Ehe-Linien
+    // Ehe-Linien (klickbar zum Löschen)
     const gesehen = new Set();
     DATA.personen.forEach(p => {
       (p.partner || []).forEach(pid => {
@@ -382,14 +465,18 @@
         if (gesehen.has(schluessel)) return;
         gesehen.add(schluessel);
         const a = positionen[p.id], b = positionen[pid];
-        const yA = a.y + BOX_H / 2, yB = b.y + BOX_H / 2;
+        let pfad;
         if (Math.abs(a.y - b.y) < 4) {
-          const links = Math.min(a.x, b.x) + (a.x < b.x ? BOX_B : 0);
-          const rechts = Math.max(a.x, b.x) + (a.x < b.x ? 0 : BOX_B);
-          teile.push(`<line x1="${links}" y1="${yA}" x2="${rechts}" y2="${yB}" stroke="#7c2d12" stroke-width="1.7"/>`);
+          const links = a.x < b.x ? a.x + BOX_B : b.x + BOX_B;
+          const rechts = a.x < b.x ? b.x : a.x;
+          const yMitte = a.y + BOX_H / 2;
+          pfad = `M ${links} ${yMitte} L ${rechts} ${yMitte}`;
         } else {
-          teile.push(`<line x1="${a.x + BOX_B / 2}" y1="${a.y + BOX_H / 2}" x2="${b.x + BOX_B / 2}" y2="${b.y + BOX_H / 2}" stroke="#7c2d12" stroke-width="1.7" stroke-dasharray="5 3"/>`);
+          pfad = `M ${a.x + BOX_B / 2} ${a.y + BOX_H / 2} L ${b.x + BOX_B / 2} ${b.y + BOX_H / 2}`;
         }
+        teile.push(`<path d="${pfad}" fill="none" stroke="#7c2d12" stroke-width="1.7"/>`);
+        teile.push(`<path d="${pfad}" fill="none" stroke="transparent" stroke-width="14"
+          class="treffer" data-art="ehe" data-a="${p.id}" data-b="${pid}"><title>Ehe-Verbindung löschen</title></path>`);
       });
     });
 
@@ -403,21 +490,24 @@
       const zuX = positionen[kind.id].x + BOX_B / 2;
       const zuY = positionen[kind.id].y;
       const bus = vonY + Math.max(14, (zuY - vonY) / 2);
-      teile.push(`<path d="M ${vonX} ${vonY} L ${vonX} ${bus} L ${zuX} ${bus} L ${zuX} ${zuY}"
-        fill="none" stroke="#bcae95" stroke-width="1.5"/>`);
+      const pfad = `M ${vonX} ${vonY} L ${vonX} ${bus} L ${zuX} ${bus} L ${zuX} ${zuY}`;
+      teile.push(`<path d="${pfad}" fill="none" stroke="#bcae95" stroke-width="1.5"/>`);
+      teile.push(`<path d="${pfad}" fill="none" stroke="transparent" stroke-width="14"
+        class="treffer" data-art="kind" data-kind="${kind.id}"><title>Eltern-Verbindung löschen</title></path>`);
     });
 
     if (verbinden) {
       teile.push(`<line x1="${verbinden.x1}" y1="${verbinden.y1}" x2="${verbinden.x}" y2="${verbinden.y}"
-        stroke="#7c2d12" stroke-width="2" stroke-dasharray="6 4"/>`);
+        stroke="#7c2d12" stroke-width="2" stroke-dasharray="6 4" pointer-events="none"/>`);
     }
     gruppe.innerHTML = teile.join("");
-  }
 
-  function svgPunkt(ev) {
-    const svg = document.getElementById("board");
-    const rechteck = svg.getBoundingClientRect();
-    return { x: ev.clientX - rechteck.left, y: ev.clientY - rechteck.top };
+    gruppe.querySelectorAll(".treffer").forEach(pfad => {
+      pfad.addEventListener("click", ev => {
+        ev.stopPropagation();
+        loescheVerbindung(pfad.dataset);
+      });
+    });
   }
 
   function verdrahten() {
@@ -425,14 +515,15 @@
     if (!svg) return;
 
     svg.addEventListener("pointerdown", ev => {
+      const treffer = ev.target.closest(".treffer");
+      if (treffer) return;                       // Linienklick = löschen, nicht ziehen
       const griff = ev.target.closest(".griff");
       const kasten = ev.target.closest(".box");
       if (griff && kasten) {
         const id = kasten.dataset.id;
         const p = positionen[id];
-        verbinden = { von: id, x1: p.x + BOX_B / 2, y1: p.y + BOX_H, x: 0, y: 0 };
-        const punkt = svgPunkt(ev);
-        verbinden.x = punkt.x; verbinden.y = punkt.y;
+        const punkt = weltPunkt(ev);
+        verbinden = { von: id, x1: p.x + BOX_B / 2, y1: p.y + BOX_H, x: punkt.x, y: punkt.y };
         svg.setPointerCapture(ev.pointerId);
         zeichneLinien();
         ev.preventDefault();
@@ -440,18 +531,31 @@
       }
       if (kasten) {
         const id = kasten.dataset.id;
-        const punkt = svgPunkt(ev);
-        ziehen = { id, dx: punkt.x - positionen[id].x, dy: punkt.y - positionen[id].y };
+        const punkt = weltPunkt(ev);
+        ziehen = { id, dx: punkt.x - positionen[id].x, dy: punkt.y - positionen[id].y, bewegt: false };
         svg.setPointerCapture(ev.pointerId);
         ev.preventDefault();
+        return;
       }
+      // freie Fläche: Ansicht verschieben (unendliche Fläche)
+      schieben = { sx: ev.clientX, sy: ev.clientY, x0: ansicht.x, y0: ansicht.y };
+      svg.setPointerCapture(ev.pointerId);
+      svg.classList.add("schiebend");
+      ev.preventDefault();
     });
 
     svg.addEventListener("pointermove", ev => {
+      if (schieben) {
+        ansicht.x = schieben.x0 - (ev.clientX - schieben.sx) / ansicht.zoom;
+        ansicht.y = schieben.y0 - (ev.clientY - schieben.sy) / ansicht.zoom;
+        zeichneAnsicht();
+        return;
+      }
       if (!ziehen && !verbinden) return;
-      const punkt = svgPunkt(ev);
+      const punkt = weltPunkt(ev);
       if (ziehen) {
-        positionen[ziehen.id] = { x: Math.max(0, punkt.x - ziehen.dx), y: Math.max(0, punkt.y - ziehen.dy) };
+        positionen[ziehen.id] = { x: punkt.x - ziehen.dx, y: punkt.y - ziehen.dy };
+        ziehen.bewegt = true;
         const knoten = document.querySelector(`.box[data-id="${ziehen.id}"]`);
         if (knoten) knoten.setAttribute("transform",
           `translate(${positionen[ziehen.id].x},${positionen[ziehen.id].y})`);
@@ -463,33 +567,81 @@
     });
 
     svg.addEventListener("pointerup", async ev => {
+      if (schieben) {
+        schieben = null;
+        svg.classList.remove("schiebend");
+        return;
+      }
       if (verbinden) {
         const ziel = document.elementFromPoint(ev.clientX, ev.clientY)?.closest(".box");
         const von = verbinden.von;
         verbinden = null;
-        if (ziel && ziel.dataset.id !== von) {
-          await verknuepfe(von, ziel.dataset.id);
-        } else {
-          zeichneLinien();
-        }
+        if (ziel && ziel.dataset.id !== von) await verknuepfe(von, ziel.dataset.id);
+        else zeichneLinien();
       }
       if (ziehen) {
         const id = ziehen.id;
+        const bewegt = ziehen.bewegt;
         ziehen = null;
-        await speicherePosition(id);
+        if (bewegt) await speicherePosition(id);
       }
     });
 
-    svg.addEventListener("dblclick", async ev => {
-      if (ev.target.closest(".box")) return;
-      const punkt = svgPunkt(ev);
-      await neuePersonBei(punkt.x, punkt.y);
+    svg.addEventListener("pointercancel", () => {
+      schieben = null; ziehen = null; verbinden = null;
+      svg.classList.remove("schiebend");
+      zeichneLinien();
     });
+
+    svg.addEventListener("wheel", ev => {
+      ev.preventDefault();
+      const rechteck = svg.getBoundingClientRect();
+      zoome(ev.deltaY < 0 ? 1.12 : 1 / 1.12,
+            { x: ev.clientX - rechteck.left, y: ev.clientY - rechteck.top });
+    }, { passive: false });
+
+    svg.addEventListener("dblclick", async ev => {
+      if (ev.target.closest(".box") || ev.target.closest(".treffer")) return;
+      const punkt = weltPunkt(ev);
+      await neuePersonBei(Math.round(punkt.x), Math.round(punkt.y));
+    });
+  }
+
+  /* ---------- Rückgängig ---------- */
+  function merke(text, schritte) {
+    verlauf.push({ text, schritte });
+    if (verlauf.length > 50) verlauf.shift();
+    aktualisiereWerkzeug();
+  }
+
+  async function rueckgaengig() {
+    const eintrag = verlauf.pop();
+    if (!eintrag) { meldung("nichts mehr rückgängig zu machen"); return; }
+    try {
+      for (const schritt of eintrag.schritte) {
+        await sendeAPI(schritt);
+        if (schritt.loeschen) {
+          const index = DATA.personen.findIndex(p => p.id === schritt.loeschen);
+          if (index >= 0) DATA.personen.splice(index, 1);
+          delete byId[schritt.loeschen];
+          delete positionen[schritt.loeschen];
+        } else if (byId[schritt.id]) {
+          Object.assign(byId[schritt.id], schritt.felder);
+        }
+      }
+      neuRechnen();
+      neuZeichnen();
+      baueGrafik();
+      meldung("rückgängig: " + eintrag.text);
+    } catch (fehler) {
+      meldung("Rückgängig fehlgeschlagen: " + fehler.message);
+    }
   }
 
   async function verknuepfe(vonId, zuId) {
     const von = byId[vonId], zu = byId[zuId];
-    const status = document.getElementById("b-status");
+    const alteVon = { partner: [...(von.partner || [])] };
+    const alteZu = { partner: [...(zu.partner || [])], eltern: [...(zu.eltern || [])] };
     try {
       if (modus === "ehe") {
         const partnerVon = new Set(von.partner || []); partnerVon.add(zuId);
@@ -498,22 +650,67 @@
         await sendeAPI({ id: zuId, felder: { partner: [...partnerZu] } });
         Object.assign(von, { partner: [...partnerVon], web: true });
         Object.assign(zu, { partner: [...partnerZu], web: true });
-        if (status) status.textContent = `${von.name} ⇄ ${zu.name} verheiratet`;
+        merke(`${von.name} ⇄ ${zu.name} verheiratet`,
+              [{ id: vonId, felder: alteVon }, { id: zuId, felder: { partner: alteZu.partner } }]);
+        neuRechnen();
+        neuZeichnen();
+        baueGrafik();
+        meldung(`${von.name} ⇄ ${zu.name} verheiratet`);
       } else {
-        // von = Elternteil, zu = Kind. Vorhandenen Partner als zweiten Elternteil übernehmen.
         const partner = (von.partner || []).find(pid => byId[pid]) || null;
         const eltern = partner ? [vonId, partner] : [vonId];
         await sendeAPI({ id: zuId, felder: { eltern } });
         zu.eltern = eltern;
         zu.web = true;
-        if (status) status.textContent = `${zu.name} ist jetzt Kind von ${von.name}`;
+        merke(`${zu.name} ← Eltern ${von.name}`,
+              [{ id: zuId, felder: { eltern: alteZu.eltern } }]);
+        neuRechnen();
+        neuZeichnen();
+        baueGrafik();
+        meldung(`${zu.name} ist jetzt Kind von ${von.name}`);
       }
-      neuRechnen();
-      neuZeichnen();
-      baueGrafik();
     } catch (fehler) {
-      if (status) status.textContent = "Nicht verknüpft: " + fehler.message;
+      meldung("Nicht verknüpft: " + fehler.message);
     }
+  }
+
+  /* Verbindung löschen - per Klick auf die Linie */
+  async function loescheVerbindung(daten) {
+    if (daten.art === "ehe") {
+      const a = byId[daten.a], b = byId[daten.b];
+      if (!a || !b) return;
+      if (!confirm(`Ehe-Verbindung ${a.name} ⇄ ${b.name} löschen?`)) return;
+      const altA = [...(a.partner || [])], altB = [...(b.partner || [])];
+      const neuA = altA.filter(x => x !== b.id);
+      const neuB = altB.filter(x => x !== a.id);
+      try {
+        await sendeAPI({ id: a.id, felder: { partner: neuA } });
+        await sendeAPI({ id: b.id, felder: { partner: neuB } });
+        Object.assign(a, { partner: neuA, web: true });
+        Object.assign(b, { partner: neuB, web: true });
+        merke(`Ehe ${a.name} ⇄ ${b.name} gelöscht`,
+              [{ id: a.id, felder: { partner: altA } }, { id: b.id, felder: { partner: altB } }]);
+        neuRechnen(); neuZeichnen(); baueGrafik();
+        meldung(`Ehe-Verbindung ${a.name} ⇄ ${b.name} gelöscht`);
+      } catch (fehler) { meldung("Nicht gelöscht: " + fehler.message); }
+      return;
+    }
+
+    // art = "kind": Eltern des Kindes entfernen
+    const kind = byId[daten.kind];
+    if (!kind) return;
+    const alt = [...(kind.eltern || [])];
+    if (!alt.length) return;
+    const namen = alt.map(e => byId[e]?.name || e).join(" und ");
+    if (!confirm(`Eltern-Verbindung löschen: ${kind.name} ist nicht mehr Kind von ${namen}?`)) return;
+    try {
+      await sendeAPI({ id: kind.id, felder: { eltern: [] } });
+      kind.eltern = [];
+      kind.web = true;
+      merke(`Eltern von ${kind.name} gelöst`, [{ id: kind.id, felder: { eltern: alt } }]);
+      neuRechnen(); neuZeichnen(); baueGrafik();
+      meldung(`Eltern-Verbindung von ${kind.name} gelöscht`);
+    } catch (fehler) { meldung("Nicht gelöscht: " + fehler.message); }
   }
 
   async function neuePersonBei(x, y) {
@@ -530,6 +727,7 @@
       DATA.personen.push(neu);
       byId[id] = neu;
       positionen[id] = { x: felder.pos_x, y: felder.pos_y };
+      merke("neue Person angelegt", [{ loeschen: id }]);
       neuRechnen();
       neuZeichnen();
       baueGrafik();
@@ -739,21 +937,41 @@
     baueReiter();
     neuZeichnen();
 
-    // Werkzeugleiste des Boards nach jedem Aufbau verdrahten
+    // Werkzeugleiste des Boards
     document.addEventListener("click", ev => {
-      if (ev.target.id === "b-modus-kind" || ev.target.id === "b-modus-ehe") {
-        modus = ev.target.id === "b-modus-kind" ? "kind" : "ehe";
+      const id = ev.target.id;
+      if (id === "b-modus-kind" || id === "b-modus-ehe") {
+        modus = id === "b-modus-kind" ? "kind" : "ehe";
         baueGrafik();
       }
-      if (ev.target.id === "b-neu") {
-        const { breite, hoehe } = boardGroesse();
-        neuePersonBei(Math.round(breite / 2 - BOX_B / 2), Math.round(hoehe / 2 - BOX_H / 2));
+      if (id === "b-undo") rueckgaengig();
+      if (id === "b-jetzt") { zeigeAktuelleGeneration(); meldung("aktuelle Generation gezeigt"); }
+      if (id === "b-zoom-in") zoome(1.15);
+      if (id === "b-zoom-out") zoome(1 / 1.15);
+      if (id === "b-neu") {
+        const svg = document.getElementById("board");
+        const r = svg.getBoundingClientRect();
+        const x = ansicht.x + (r.width / ansicht.zoom) / 2 - BOX_B / 2;
+        const y = ansicht.y + (r.height / ansicht.zoom) / 2 - BOX_H / 2;
+        neuePersonBei(Math.round(x), Math.round(y));
       }
-      if (ev.target.id === "b-reset") {
+      if (id === "b-reset") {
+        if (!confirm("Alle Kasten-Positionen verwerfen und neu nach Generationen anordnen?")) return;
         Object.keys(positionen).forEach(k => delete positionen[k]);
         autoLayout();
         zeichneKnoten(); zeichneLinien();
+        zeigeAktuelleGeneration();
         speichereAllePositionen();
+        meldung("neu angeordnet");
+      }
+    });
+
+    document.addEventListener("keydown", ev => {
+      const tippt = ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName);
+      if (tippt) return;
+      if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "z") {
+        ev.preventDefault();
+        rueckgaengig();
       }
     });
 
