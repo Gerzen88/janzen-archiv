@@ -1,0 +1,8 @@
+name = "janzen-archiv"
+pages_build_output_dir = "."
+compatibility_date = "2026-10-01"
+
+# Speicher für Änderungen aus dem Web (Funktion "Bearbeiten")
+[[kv_namespaces]]
+binding = "AHNEN_KV"
+id = "b1f56ae03b4640b3b14b991a3f5a3945"
