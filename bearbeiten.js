@@ -135,7 +135,29 @@
 
   function jahresText(p) { return (p.jahr || "?") + "–" + (p.jahr_bis || "?"); }
   function esc(s) { return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;"); }
-  function istWeiblich(p) { return femaleNamen.has(String(p.vorname || "").toLowerCase()); }
+  function istWeiblich(p) { return geschlechtVon(p) === "w"; }
+
+  /* w / m / "" - Angabe vor berechnetem Wert vor Vornamensschätzung */
+  function geschlechtVon(p) {
+    const e = String((p && p.geschlecht) || "").trim().toLowerCase();
+    if (["w", "f", "weiblich", "female", "frau"].includes(e)) return "w";
+    if (["m", "male", "männlich", "maennlich", "mann"].includes(e)) return "m";
+    const berechnet = String((p && p.geschlecht_ermittelt) || "").trim().toLowerCase();
+    if (berechnet === "w" || berechnet === "m") return berechnet;
+    if (femaleNamen.has(String((p && p.vorname) || "").toLowerCase())) return "w";
+    return "";
+  }
+
+  /* Anzeigename aus den Namensfeldern - Geburtsname hat Vorrang vor der Partnerschätzung */
+  function anzeigename(vorname, nachname, geburtsname, geschlecht, partnerPerson) {
+    const basis = `${vorname || ""} ${nachname || ""}`.trim();
+    if (geburtsname && geburtsname !== nachname) return `${basis} (geb. ${geburtsname})`;
+    if (!geburtsname && istWeiblich({ vorname, geschlecht }) && partnerPerson &&
+        partnerPerson.nachname && partnerPerson.nachname !== nachname) {
+      return `${vorname} ${partnerPerson.nachname} (geb. ${nachname})`;
+    }
+    return basis;
+  }
 
   function kinderVon(id) {
     const alle = new Set();
@@ -197,14 +219,29 @@
     const mutter = !istNeu && (p.eltern || [])[1] ? p.eltern[1] : "";
     const partner = !istNeu && (p.partner || [])[0] ? p.partner[0] : "";
 
+    const gRoh = String(p.geschlecht || "").trim().toLowerCase();
+    const geschlechtWert = ["w", "f", "weiblich", "female", "frau"].includes(gRoh) ? "w"
+                         : ["m", "male", "männlich", "maennlich", "mann"].includes(gRoh) ? "m" : "";
+
     document.getElementById("detail").innerHTML = `
       <h2 style="margin-bottom:2px">${istNeu ? "Neue Person" : esc(p.name)}</h2>
       <div class="rolle" style="margin-bottom:10px">${istNeu ? "wird beim Speichern angelegt" : esc(p.rolle || "")}</div>
       <div class="editor">
         <div class="paar">
           <div><label>Vorname</label><input id="e-vorname" value="${esc(p.vorname)}"></div>
-          <div><label>Nachname</label><input id="e-nachname" value="${esc(p.nachname || "Janzen")}"></div>
+          <div><label>Nachname (Ehename)</label><input id="e-nachname" value="${esc(p.nachname || "Janzen")}"></div>
         </div>
+        <div class="paar">
+          <div><label>Geburtsname</label>
+            <input id="e-geburtsname" value="${esc(p.geburtsname)}" placeholder="nur falls abweichend"></div>
+          <div><label>Geschlecht</label>
+            <select id="e-geschlecht">
+              <option value=""${!geschlechtWert ? " selected" : ""}>unbekannt</option>
+              <option value="m"${geschlechtWert === "m" ? " selected" : ""}>männlich</option>
+              <option value="w"${geschlechtWert === "w" ? " selected" : ""}>weiblich</option>
+            </select></div>
+        </div>
+        <div class="hinweis" id="e-name-vorschau" style="font-size:11.5px;margin:-2px 0 6px"></div>
         <div class="paar">
           <div><label>Geburtsjahr</label><input id="e-jahr" type="number" value="${p.jahr ?? ""}"></div>
           <div><label>Sterbejahr</label><input id="e-jahr_bis" type="number" value="${p.jahr_bis ?? ""}"></div>
@@ -235,6 +272,31 @@
       istNeu ? zeigePerson("gerhard") : zeigePerson(p.id));
     const loeschen = document.getElementById("e-loeschen");
     if (loeschen) loeschen.addEventListener("click", () => zuruecksetzen(p.id));
+
+    /* Vorschau des Anzeigenamens - zeigt sofort, was aus den Namensfeldern wird */
+    const vorschau = () => {
+      const feld = document.getElementById("e-name-vorschau");
+      if (!feld) return;
+      const pp = byId[wert("e-partner")] || null;
+      const name = anzeigename(wert("e-vorname"), wert("e-nachname"),
+                               wert("e-geburtsname"), wert("e-geschlecht"), pp);
+      const geschaetzt = geschlechtVon({
+        vorname: wert("e-vorname"),
+        geschlecht_ermittelt: istNeu ? "" : (p.geschlecht_ermittelt || ""),
+      });
+      const zusatz = wert("e-geschlecht") ? ""
+        : ` · Geschlecht nicht gesetzt – angezeigt wird derzeit „${
+            geschaetzt === "w" ? "weiblich" : geschaetzt === "m" ? "männlich" : "unbekannt"}“${
+            p.geschlecht_quelle ? ` (aus ${p.geschlecht_quelle})` : ""}`;
+      feld.textContent = `Anzeige: ${name}${zusatz}`;
+    };
+    ["e-vorname", "e-nachname", "e-geburtsname", "e-geschlecht", "e-partner"].forEach(kennung => {
+      const feld = document.getElementById(kennung);
+      if (!feld) return;
+      feld.addEventListener("input", vorschau);
+      feld.addEventListener("change", vorschau);
+    });
+    if (!istNeu) vorschau();
   }
 
   async function speichere(id) {
@@ -245,23 +307,26 @@
       status.textContent = "Vor- oder Nachname fehlt.";
       return;
     }
+    const geburtsname = wert("e-geburtsname");
+    const geschlecht = wert("e-geschlecht");
     const eltern = [wert("e-vater"), wert("e-mutter")].filter(Boolean);
     const partner = [wert("e-partner")].filter(Boolean);
     const ziel = id || ("web_" + Date.now().toString(36));
 
-    let anzeige = `${vorname} ${nachname}`.trim();
     const partnerPerson = partner.length ? byId[partner[0]] : null;
-    const weiblich = istWeiblich({ vorname });
-    if (weiblich && partnerPerson && partnerPerson.nachname &&
-        partnerPerson.nachname !== nachname) {
-      anzeige = `${vorname} ${partnerPerson.nachname} (geb. ${nachname})`;
-    }
+    const anzeige = anzeigename(vorname, nachname, geburtsname, geschlecht, partnerPerson);
+
+    /* Dieselben Typen wie im Server erzeugen - sonst zeigt die Akte nach dem
+       Speichern nicht mehr an (offen als Text würde p.offen.map() sprengen). */
+    const offenListe = wert("e-offen").split(";").map(s => s.trim()).filter(Boolean);
+    const jahrWert = wert("e-jahr"), jahrBisWert = wert("e-jahr_bis");
 
     const felder = {
-      vorname, nachname, name: anzeige,
-      jahr: wert("e-jahr") || null, jahr_bis: wert("e-jahr_bis") || null,
+      vorname, nachname, geburtsname, geschlecht, name: anzeige,
+      jahr: jahrWert ? Number(jahrWert) : null,
+      jahr_bis: jahrBisWert ? Number(jahrBisWert) : null,
       datum: wert("e-datum"), ort: wert("e-ort"), rolle: wert("e-rolle"),
-      notiz: wert("e-notiz"), offen: wert("e-offen"),
+      notiz: wert("e-notiz"), offen: offenListe,
       eltern, partner, belegt: "Angabe über die Webseite",
     };
     status.className = "status";
@@ -1324,7 +1389,9 @@
     personen.forEach(p => {
       zeilen.push(`0 @${nummern[p.id]}@ INDI`);
       zeilen.push(`1 NAME ${p.vorname || ""} /${p.nachname || ""}/`.trim());
-      if (p.vorname || p.nachname) zeilen.push(`1 SEX ${istWeiblich(p) ? "F" : "M"}`);
+      if (p.geburtsname && p.geburtsname !== p.nachname) zeilen.push(`2 _GEBURTSNAME ${p.geburtsname}`);
+      const geschlecht = geschlechtVon(p);
+      if (geschlecht) zeilen.push(`1 SEX ${geschlecht === "w" ? "F" : "M"}`);
       const geburt = gedcomDatum(p);
       if (geburt || p.ort) {
         zeilen.push("1 BIRT");

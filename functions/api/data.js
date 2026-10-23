@@ -20,7 +20,8 @@ function json(obj, status = 200) {
   });
 }
 
-const ERLAUBT = ["name", "vorname", "nachname", "jahr", "jahr_bis", "datum", "ort",
+const ERLAUBT = ["name", "vorname", "nachname", "geburtsname", "geschlecht",
+                 "jahr", "jahr_bis", "datum", "ort",
                  "rolle", "notiz", "belegt", "offen", "eltern", "partner", "kandidaten",
                  "pos_x", "pos_y"];
 
@@ -39,6 +40,12 @@ function aufraeumen(quelle) {
     if (feld === "eltern" || feld === "partner") {
       wert = Array.isArray(wert) ? wert : String(wert || "").split(",").map(s => s.trim()).filter(Boolean);
     }
+    if (feld === "geschlecht") {
+      const g = String(wert || "").trim().toLowerCase();
+      wert = /^(m|männlich|maennlich|male|mann)$/.test(g) ? "m"
+           : /^(w|weiblich|female|frau|f)$/.test(g) ? "w" : "";
+    }
+    if (feld === "geburtsname") wert = String(wert || "").trim();
     ziel[feld] = wert;
   }
   return ziel;
