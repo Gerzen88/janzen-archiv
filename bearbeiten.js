@@ -185,8 +185,16 @@
     const partner = [wert("e-partner")].filter(Boolean);
     const ziel = id || ("web_" + Date.now().toString(36));
 
+    /* Anzeigename: heiratet jemand in einen anderen Nachnamen ein, bleibt der
+       Geburtsname sichtbar - "Katharina Janzen (geb. Isaak)" statt "Katharina Isaak". */
+    let anzeige = `${vorname} ${nachname}`.trim();
+    const partnerPerson = partner.length ? byId[partner[0]] : null;
+    if (partnerPerson && partnerPerson.nachname && partnerPerson.nachname !== nachname) {
+      anzeige = `${vorname} ${partnerPerson.nachname} (geb. ${nachname})`;
+    }
+
     const felder = {
-      vorname, nachname, name: `${vorname} ${nachname}`.trim(),
+      vorname, nachname, name: anzeige,
       jahr: wert("e-jahr") || null,
       jahr_bis: wert("e-jahr_bis") || null,
       datum: wert("e-datum"),
