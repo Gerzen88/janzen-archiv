@@ -262,6 +262,8 @@ function zeigePerson(id){
   if (p.notiz)
     html += `<div class="block"><h4>Hinweis</h4><div style="font-size:13px">${p.notiz}</div></div>`;
 
+  html += `<div class="block"><button class="bearb-knopf" data-bearb="${p.id}">✎ Bearbeiten</button></div>`;
+
   if (belege.length)
     html += `<div class="block"><h4>Belege (${belege.length})</h4><ul>` +
       belege.map(b => `<li><a href="#" data-beleg="${b.id}">${b.titel}</a>
