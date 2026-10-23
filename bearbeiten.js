@@ -19,6 +19,10 @@
   let ansicht = { x: -200, y: -150, zoom: 1 };
   let ansichtGesetzt = false;
   const verlauf = [];           // Rückgängig-Stapel
+  const redoStapel = [];        // Wiederholen-Stapel
+  let rasterAn = false;         // Einrasten auf 24-px-Raster
+  let entwurf = null;           // {x, y, eltern, partnerVon} während der Namenseingabe
+  let speicherStand = "";       // Anzeige im Werkzeugkasten
 
   /* ---------- Stil ---------- */
   const stil = document.createElement("style");
@@ -154,14 +158,29 @@
   function wert(id) { const el = document.getElementById(id); return el ? el.value.trim() : ""; }
 
   async function sendeAPI(daten) {
-    const antwort = await fetch("/api/data", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(daten),
-    });
-    const ergebnis = await antwort.json();
-    if (!antwort.ok || ergebnis.fehler) throw new Error(ergebnis.fehler || antwort.status);
-    webDaten = ergebnis.daten;
-    return ergebnis;
+    zeigeSpeicherstand("speichert …", false);
+    try {
+      const antwort = await fetch("/api/data", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(daten),
+      });
+      const ergebnis = await antwort.json();
+      if (!antwort.ok || ergebnis.fehler) throw new Error(ergebnis.fehler || antwort.status);
+      webDaten = ergebnis.daten;
+      zeigeSpeicherstand("gespeichert " + new Date().toLocaleTimeString("de-DE").slice(0, 5), true);
+      return ergebnis;
+    } catch (fehler) {
+      zeigeSpeicherstand("nicht gespeichert: " + fehler.message, false, true);
+      throw fehler;
+    }
+  }
+
+  function zeigeSpeicherstand(text, ok, fehler = false) {
+    speicherStand = text;
+    const el = document.getElementById("b-save");
+    if (!el) return;
+    el.textContent = text;
+    el.style.color = fehler ? "#8c2f2f" : (ok ? "#2f6b3f" : "#9a6a12");
   }
 
   /* ---------- Editor im Detailpanel ---------- */
@@ -312,7 +331,10 @@
   function baueGrafik() {
     const behaelter = document.getElementById("grafik");
     if (!behaelter) return;
-    const personen = DATA.personen.filter(p => verbunden.has(p.id));
+    // Alles zeigen, was verbunden ist ODER eine eigene Position hat
+    // (neu angelegte Personen sind noch nicht verbunden, sollen aber sichtbar sein)
+    const personen = DATA.personen.filter(p => verbunden.has(p.id) ||
+      (typeof p.pos_x === "number" && typeof p.pos_y === "number"));
     if (!personen.length) { behaelter.innerHTML = '<p style="padding:16px">Keine verbundenen Personen.</p>'; return; }
 
     // Positionen: gespeicherte übernehmen, Rest automatisch
@@ -335,17 +357,29 @@
         <button id="b-modus-ehe" class="${modus === "ehe" ? "an" : ""}">Verknüpfen: Ehepartner</button>
         <button id="b-neu">＋ Person</button>
         <button id="b-undo">↶ Rückgängig</button>
+        <button id="b-redo">↷ Wiederholen</button>
+        <button id="b-raster" class="${rasterAn ? "an" : ""}">Raster</button>
         <button id="b-jetzt">Aktuelle Generation</button>
         <button id="b-reset">Neu anordnen</button>
         <button id="b-zoom-out">−</button>
         <span class="zoomanzeige" id="b-zoom">100 %</span>
         <button id="b-zoom-in">+</button>
-        <span class="hinweis">Fläche ziehen = verschieben · Rad = zoomen · Griff unten = verknüpfen · Linie anklicken = löschen · Doppelklick = neue Person</span>
+        <span class="hinweis">Doppelklick = Person · Rechtsklick = Menü · Fläche ziehen = verschieben · Rad = zoomen · Griff = verknüpfen · Linie = löschen</span>
+        <span id="b-save" class="hinweis"></span>
         <span id="b-status" class="hinweis"></span>
       </div>`;
 
     behaelter.innerHTML = werkzeug +
-      `<svg id="board"><g id="linien"></g><g id="knoten"></g></svg>`;
+      `<svg id="board">
+         <defs>
+           <pattern id="raster" width="24" height="24" patternUnits="userSpaceOnUse">
+             <circle cx="2" cy="2" r="1.1" fill="#e2d6bf"/>
+           </pattern>
+         </defs>
+         <rect id="hintergrund" x="0" y="0" width="100" height="100" fill="url(#raster)"/>
+         <g id="linien"></g>
+         <g id="knoten"></g>
+       </svg>`;
     zeichneKnoten();
     zeichneLinien();
     verdrahten();
@@ -362,6 +396,13 @@
     const breite = Math.max(120, rechteck.width) / ansicht.zoom;
     const hoehe = Math.max(120, rechteck.height) / ansicht.zoom;
     svg.setAttribute("viewBox", `${ansicht.x} ${ansicht.y} ${breite} ${hoehe}`);
+    const hintergrund = document.getElementById("hintergrund");
+    if (hintergrund) {
+      hintergrund.setAttribute("x", ansicht.x);
+      hintergrund.setAttribute("y", ansicht.y);
+      hintergrund.setAttribute("width", breite);
+      hintergrund.setAttribute("height", hoehe);
+    }
     const anzeige = document.getElementById("b-zoom");
     if (anzeige) anzeige.textContent = Math.round(ansicht.zoom * 100) + " %";
   }
@@ -421,6 +462,8 @@
     if (status && !status.textContent) status.textContent = "";
     const z = document.getElementById("b-zoom");
     if (z) z.textContent = Math.round(ansicht.zoom * 100) + " %";
+    const save = document.getElementById("b-save");
+    if (save && speicherStand) save.textContent = speicherStand;
   }
 
   function meldung(text) {
@@ -431,7 +474,8 @@
   function zeichneKnoten() {
     const gruppe = document.getElementById("knoten");
     if (!gruppe) return;
-    const personen = DATA.personen.filter(p => verbunden.has(p.id) && positionen[p.id]);
+    const personen = DATA.personen.filter(p =>
+      (verbunden.has(p.id) || typeof p.pos_x === "number") && positionen[p.id]);
     gruppe.innerHTML = personen.map(p => {
       const { x, y } = positionen[p.id];
       const strich = p.web ? ' stroke-dasharray="4 3"' : "";
@@ -554,7 +598,13 @@
       if (!ziehen && !verbinden) return;
       const punkt = weltPunkt(ev);
       if (ziehen) {
-        positionen[ziehen.id] = { x: punkt.x - ziehen.dx, y: punkt.y - ziehen.dy };
+        let neuX = punkt.x - ziehen.dx;
+        let neuY = punkt.y - ziehen.dy;
+        if (rasterAn) {
+          neuX = Math.round(neuX / 24) * 24;
+          neuY = Math.round(neuY / 24) * 24;
+        }
+        positionen[ziehen.id] = { x: neuX, y: neuY };
         ziehen.bewegt = true;
         const knoten = document.querySelector(`.box[data-id="${ziehen.id}"]`);
         if (knoten) knoten.setAttribute("transform",
@@ -600,10 +650,17 @@
             { x: ev.clientX - rechteck.left, y: ev.clientY - rechteck.top });
     }, { passive: false });
 
-    svg.addEventListener("dblclick", async ev => {
+    svg.addEventListener("dblclick", ev => {
       if (ev.target.closest(".box") || ev.target.closest(".treffer")) return;
       const punkt = weltPunkt(ev);
-      await neuePersonBei(Math.round(punkt.x), Math.round(punkt.y));
+      starteEntwurf(Math.round(punkt.x), Math.round(punkt.y));
+    });
+
+    svg.addEventListener("contextmenu", ev => {
+      const kasten = ev.target.closest(".box");
+      if (!kasten) return;
+      ev.preventDefault();
+      zeigeKontextmenue(ev, kasten.dataset.id);
     });
   }
 
@@ -617,8 +674,17 @@
   async function rueckgaengig() {
     const eintrag = verlauf.pop();
     if (!eintrag) { meldung("nichts mehr rückgängig zu machen"); return; }
+    const gegen = [];
     try {
       for (const schritt of eintrag.schritte) {
+        if (!schritt.loeschen) {
+          const person = byId[schritt.id];
+          const alt = {};
+          for (const feld of Object.keys(schritt.felder || {})) {
+            alt[feld] = person && person[feld] !== undefined ? person[feld] : null;
+          }
+          gegen.push({ id: schritt.id, felder: alt });
+        }
         await sendeAPI(schritt);
         if (schritt.loeschen) {
           const index = DATA.personen.findIndex(p => p.id === schritt.loeschen);
@@ -629,12 +695,39 @@
           Object.assign(byId[schritt.id], schritt.felder);
         }
       }
+      const hatLoeschen = eintrag.schritte.some(s => s.loeschen);
+      if (gegen.length && !hatLoeschen) redoStapel.push({ text: eintrag.text, schritte: gegen });
       neuRechnen();
       neuZeichnen();
       baueGrafik();
       meldung("rückgängig: " + eintrag.text);
     } catch (fehler) {
       meldung("Rückgängig fehlgeschlagen: " + fehler.message);
+    }
+  }
+
+  async function wiederholen() {
+    const eintrag = redoStapel.pop();
+    if (!eintrag) { meldung("nichts zu wiederholen"); return; }
+    const gegen = [];
+    try {
+      for (const schritt of eintrag.schritte) {
+        const person = byId[schritt.id];
+        const alt = {};
+        for (const feld of Object.keys(schritt.felder || {})) {
+          alt[feld] = person && person[feld] !== undefined ? person[feld] : null;
+        }
+        gegen.push({ id: schritt.id, felder: alt });
+        await sendeAPI(schritt);
+        if (byId[schritt.id]) Object.assign(byId[schritt.id], schritt.felder);
+      }
+      if (gegen.length) verlauf.push({ text: eintrag.text, schritte: gegen });
+      neuRechnen();
+      neuZeichnen();
+      baueGrafik();
+      meldung("wiederholt: " + eintrag.text);
+    } catch (fehler) {
+      meldung("Wiederholen fehlgeschlagen: " + fehler.message);
     }
   }
 
@@ -713,13 +806,20 @@
     } catch (fehler) { meldung("Nicht gelöscht: " + fehler.message); }
   }
 
-  async function neuePersonBei(x, y) {
+  async function neuePersonBei(x, y, name, optionen = {}) {
     const id = "web_" + Date.now().toString(36);
+    const teile = String(name || "").trim().split(/\s+/).filter(Boolean);
+    const vorname = teile[0] || "Neu";
+    const nachname = teile.slice(1).join(" ") || "Janzen";
+    const eltern = (optionen.eltern || []).filter(e => byId[e]);
+    const partnerVon = optionen.partnerVon && byId[optionen.partnerVon] ? optionen.partnerVon : null;
     const felder = {
-      vorname: "Neu", nachname: "Janzen", name: "Neu Janzen",
-      jahr: null, jahr_bis: null, datum: "", ort: "", rolle: "auf dem Board angelegt",
-      notiz: "", offen: "", eltern: [], partner: [],
-      belegt: "Angabe über die Webseite", pos_x: Math.round(x), pos_y: Math.round(y),
+      vorname, nachname, name: `${vorname} ${nachname}`.trim(),
+      jahr: null, jahr_bis: null, datum: "", ort: "",
+      rolle: optionen.rolle || "auf dem Board angelegt",
+      notiz: "", offen: "", eltern, partner: partnerVon ? [partnerVon] : [],
+      belegt: "Angabe über die Webseite",
+      pos_x: Math.round(x), pos_y: Math.round(y),
     };
     try {
       await sendeAPI({ id, felder });
@@ -727,13 +827,144 @@
       DATA.personen.push(neu);
       byId[id] = neu;
       positionen[id] = { x: felder.pos_x, y: felder.pos_y };
-      merke("neue Person angelegt", [{ loeschen: id }]);
+
+      // Partner zusätzlich auf der Gegenseite eintragen
+      let rueckPartner = null;
+      if (optionen.partnerVon && byId[optionen.partnerVon]) {
+        const anderer = byId[optionen.partnerVon];
+        rueckPartner = [...(anderer.partner || [])];
+        const partnerListe = [...new Set([...rueckPartner, id])];
+        await sendeAPI({ id: anderer.id, felder: { partner: partnerListe } });
+        anderer.partner = partnerListe;
+        anderer.web = true;
+        neu.partner = [anderer.id];
+      }
+
+      const rueckschritte = [{ loeschen: id }];
+      if (rueckPartner) {
+        rueckschritte.push({ id: optionen.partnerVon, felder: { partner: rueckPartner } });
+      }
+      merke(`neue Person ${felder.name}`, rueckschritte);
       neuRechnen();
       neuZeichnen();
       baueGrafik();
-      oeffneEditor(id);
-      zeigeTab("baum");
-    } catch (fehler) { alert("Konnte nicht angelegt werden: " + fehler.message); }
+      meldung(`${felder.name} angelegt`);
+      return neu;
+    } catch (fehler) {
+      alert("Konnte nicht angelegt werden: " + fehler.message);
+      return null;
+    }
+  }
+
+  /* ---------- Namenseingabe direkt auf dem Board ---------- */
+  function starteEntwurf(x, y, optionen = {}) {
+    beendeEntwurf();
+    const behaelter = document.getElementById("grafik");
+    const svg = document.getElementById("board");
+    const rSvg = svg.getBoundingClientRect();
+    const rBox = behaelter.getBoundingClientRect();
+    const links = (x - ansicht.x) * ansicht.zoom + (rSvg.left - rBox.left);
+    const oben = (y - ansicht.y) * ansicht.zoom + (rSvg.top - rBox.top);
+
+    const feld = document.createElement("div");
+    feld.id = "entwurf";
+    feld.style.cssText = `position:absolute;left:${links}px;top:${oben}px;
+      width:${BOX_B * ansicht.zoom}px;background:#fffdf7;border:2px solid #7c2d12;
+      border-radius:7px;padding:6px;box-shadow:0 6px 18px rgba(0,0,0,.18);z-index:30`;
+    feld.innerHTML = `<div style="font-size:10px;color:#6d6355;letter-spacing:1px;
+        text-transform:uppercase;margin-bottom:3px">Name – Enter speichert, Esc bricht ab</div>
+      <input id="entwurf-feld" type="text" placeholder="Vorname Nachname"
+        style="width:100%;box-sizing:border-box;padding:5px 7px;border:1px solid #ddd2bd;
+        border-radius:4px;font-size:13px;background:#fbf7ee;color:#2b2620">`;
+    behaelter.appendChild(feld);
+    entwurf = { x, y, optionen, element: feld };
+
+    const eingabe = feld.querySelector("#entwurf-feld");
+    eingabe.focus();
+    eingabe.addEventListener("keydown", async ev => {
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        const name = eingabe.value.trim();
+        if (!name) { beendeEntwurf(); return; }
+        const auftrag = entwurf.optionen;
+        beendeEntwurf();
+        await neuePersonBei(x, y, name, auftrag);
+      } else if (ev.key === "Escape") {
+        ev.preventDefault();
+        beendeEntwurf();
+      }
+    });
+    eingabe.addEventListener("blur", () => setTimeout(() => {
+      if (entwurf && document.activeElement !== document.getElementById("entwurf-feld")) {
+        const wertJetzt = document.getElementById("entwurf-feld");
+        if (wertJetzt && wertJetzt.value.trim()) wertJetzt.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+        else beendeEntwurf();
+      }
+    }, 160));
+  }
+
+  function beendeEntwurf() {
+    if (!entwurf) return;
+    entwurf.element?.remove();
+    entwurf = null;
+  }
+
+  /* ---------- Kontextmenü ---------- */
+  function zeigeKontextmenue(ev, id) {
+    schliesseKontextmenue();
+    const person = byId[id];
+    if (!person) return;
+    const eltern = (person.eltern || []).length;
+    const menue = document.createElement("div");
+    menue.id = "kontextmenue";
+    menue.style.cssText = `position:fixed;left:${ev.clientX}px;top:${ev.clientY}px;z-index:50;
+      background:#fffdf7;border:1px solid #ddd2bd;border-radius:8px;padding:5px 0;
+      box-shadow:0 8px 24px rgba(0,0,0,.16);min-width:210px;font-size:13px`;
+    const eintrag = (text, aktion, farbe) =>
+      `<button class="km" data-aktion="${aktion}" style="display:block;width:100%;text-align:left;
+        padding:7px 14px;border:0;background:transparent;font-size:13px;cursor:pointer;
+        color:${farbe || "#2b2620"}">${text}</button>`;
+    menue.innerHTML =
+      eintrag("✎ Bearbeiten", "bearbeiten") +
+      eintrag("＋ Kind hinzufügen", "kind") +
+      eintrag("＋ Partner hinzufügen", "partner") +
+      (eltern ? eintrag("Eltern-Verbindung lösen", "eltern-loesen", "#8c2f2f") : "") +
+      eintrag("Auf der Karte zeigen", "zeigen");
+    document.body.appendChild(menue);
+
+    menue.querySelectorAll(".km").forEach(knopf => {
+      knopf.addEventListener("click", async () => {
+        const aktion = knopf.dataset.aktion;
+        schliesseKontextmenue();
+        const pos = positionen[id] || { x: 0, y: 0 };
+        if (aktion === "bearbeiten") { zeigeTab("baum"); oeffneEditor(id); }
+        if (aktion === "zeigen") { zeigeTab("baum"); zeigePerson(id); }
+        if (aktion === "kind") {
+          const partner = (person.partner || []).find(p => byId[p]) || null;
+          starteEntwurf(pos.x + 20, pos.y + 150,
+            { eltern: partner ? [id, partner] : [id], rolle: "Kind von " + person.name });
+        }
+        if (aktion === "partner") {
+          starteEntwurf(pos.x + BOX_B + 60, pos.y,
+            { partnerVon: id, rolle: "Partner von " + person.name });
+        }
+        if (aktion === "eltern-loesen") {
+          if (!confirm(`Eltern-Verbindung von ${person.name} lösen?`)) return;
+          const alt = [...(person.eltern || [])];
+          await sendeAPI({ id, felder: { eltern: [] } });
+          person.eltern = [];
+          person.web = true;
+          merke(`Eltern von ${person.name} gelöst`, [{ id, felder: { eltern: alt } }]);
+          neuRechnen(); neuZeichnen(); baueGrafik();
+          meldung(`Eltern-Verbindung von ${person.name} gelöst`);
+        }
+      });
+    });
+  }
+
+  function schliesseKontextmenue() {
+    document.getElementById("kontextmenue")?.remove();
   }
 
   async function speicherePosition(id) {
@@ -892,30 +1123,30 @@
   /* ---------- Reiter ---------- */
   function baueReiter() {
     const nav = document.querySelector("nav");
-    if (!nav || document.getElementById("knopf-grafik")) return;
-    const bereiche = [["grafik", "Grafik"], ["export", "Export"]];
+    if (!nav || document.getElementById("knopf-board")) return;
+    const bereiche = [["board", "Board"], ["export", "Export"]];
 
-    bereiche.forEach(([schlüssel, titel]) => {
+    bereiche.forEach(([schluessel, titel]) => {
       const knopf = document.createElement("button");
-      knopf.id = "knopf-" + schlüssel;
-      knopf.dataset.tab = schlüssel;
+      knopf.id = "knopf-" + schluessel;
+      knopf.dataset.tab = schluessel;
       knopf.textContent = titel;
       knopf.addEventListener("click", () => {
         document.querySelectorAll("main > section").forEach(s => s.classList.add("versteckt"));
-        document.getElementById("tab-" + schlüssel).classList.remove("versteckt");
+        document.getElementById("tab-" + schluessel).classList.remove("versteckt");
         document.querySelectorAll("nav button").forEach(b => b.classList.remove("aktiv"));
         knopf.classList.add("aktiv");
-        if (schlüssel === "grafik") baueGrafik();
+        if (schluessel === "board") baueGrafik();
       });
       nav.appendChild(knopf);
       document.querySelectorAll("nav button").forEach(b => {
         if (b !== knopf) b.addEventListener("click", () =>
-          document.getElementById("tab-" + schlüssel)?.classList.add("versteckt"));
+          document.getElementById("tab-" + schluessel)?.classList.add("versteckt"));
       });
     });
 
     const grafik = document.createElement("section");
-    grafik.id = "tab-grafik";
+    grafik.id = "tab-board";
     grafik.className = "versteckt";
     grafik.innerHTML = `<div id="grafik"></div>`;
     document.querySelector("main").appendChild(grafik);
@@ -940,11 +1171,18 @@
     // Werkzeugleiste des Boards
     document.addEventListener("click", ev => {
       const id = ev.target.id;
+      if (!ev.target.closest("#kontextmenue")) schliesseKontextmenue();
       if (id === "b-modus-kind" || id === "b-modus-ehe") {
         modus = id === "b-modus-kind" ? "kind" : "ehe";
         baueGrafik();
       }
       if (id === "b-undo") rueckgaengig();
+      if (id === "b-redo") wiederholen();
+      if (id === "b-raster") {
+        rasterAn = !rasterAn;
+        baueGrafik();
+        meldung(rasterAn ? "Raster ein – Kästen rasten auf 24 px ein" : "Raster aus");
+      }
       if (id === "b-jetzt") { zeigeAktuelleGeneration(); meldung("aktuelle Generation gezeigt"); }
       if (id === "b-zoom-in") zoome(1.15);
       if (id === "b-zoom-out") zoome(1 / 1.15);
@@ -968,10 +1206,21 @@
 
     document.addEventListener("keydown", ev => {
       const tippt = ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName);
-      if (tippt) return;
-      if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "z") {
+      const strg = ev.ctrlKey || ev.metaKey;
+      if (strg && ev.key.toLowerCase() === "z" && !tippt) {
         ev.preventDefault();
-        rueckgaengig();
+        if (ev.shiftKey) wiederholen(); else rueckgaengig();
+        return;
+      }
+      if (strg && ev.key.toLowerCase() === "y" && !tippt) {
+        ev.preventDefault();
+        wiederholen();
+        return;
+      }
+      if (ev.key === "Escape") {
+        if (document.getElementById("kontextmenue")) { schliesseKontextmenue(); return; }
+        if (entwurf) { beendeEntwurf(); return; }
+        if (verbinden) { verbinden = null; zeichneLinien(); meldung("Verknüpfen abgebrochen"); }
       }
     });
 
