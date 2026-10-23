@@ -251,7 +251,9 @@
 
     let anzeige = `${vorname} ${nachname}`.trim();
     const partnerPerson = partner.length ? byId[partner[0]] : null;
-    if (partnerPerson && partnerPerson.nachname && partnerPerson.nachname !== nachname) {
+    const weiblich = istWeiblich({ vorname });
+    if (weiblich && partnerPerson && partnerPerson.nachname &&
+        partnerPerson.nachname !== nachname) {
       anzeige = `${vorname} ${partnerPerson.nachname} (geb. ${nachname})`;
     }
 
@@ -353,20 +355,28 @@
       fehlend = true;
     }
 
+    const bearbeiten = boardModus === "bearbeiten";
     const werkzeug = `
       <div class="boardwerkzeug">
-        <button id="b-modus-kind" class="${modus === "kind" ? "an" : ""}">Verknüpfen: Eltern → Kind</button>
-        <button id="b-modus-ehe" class="${modus === "ehe" ? "an" : ""}">Verknüpfen: Ehepartner</button>
+        <button id="b-modus" class="${bearbeiten ? "an" : ""}">${bearbeiten ? "🔓 Bearbeiten aktiv" : "🔒 Ansicht (geschützt)"}</button>
+        <button id="b-speichern"${offene.size ? "" : " disabled"}>⤓ Speichern${offene.size ? " (" + offene.size + ")" : ""}</button>
+        <button id="b-verwerfen"${offene.size ? "" : " disabled"}>↺ Verwerfen</button>
+        <span id="b-offen" class="hinweis"></span>
+        ${bearbeiten ? `
+        <button id="b-modus-kind" class="${modus === "kind" ? "an" : ""}">Eltern → Kind</button>
+        <button id="b-modus-ehe" class="${modus === "ehe" ? "an" : ""}">Ehepartner</button>
         <button id="b-neu">＋ Person</button>
         <button id="b-undo">↶ Rückgängig</button>
         <button id="b-redo">↷ Wiederholen</button>
-        <button id="b-raster" class="${rasterAn ? "an" : ""}">Raster</button>
+        <button id="b-raster" class="${rasterAn ? "an" : ""}">Raster</button>` : ""}
         <button id="b-jetzt">Aktuelle Generation</button>
         <button id="b-reset">Neu anordnen</button>
         <button id="b-zoom-out">−</button>
         <span class="zoomanzeige" id="b-zoom">100 %</span>
         <button id="b-zoom-in">+</button>
-        <span class="hinweis">Doppelklick = Person · Rechtsklick = Menü · Fläche ziehen = verschieben · Rad = zoomen · Griff = verknüpfen · Linie = löschen</span>
+        <span class="hinweis">${bearbeiten
+          ? "Doppelklick = Person · Rechtsklick = Menü · Griff = verknüpfen · Linie = löschen"
+          : "Nur Ansicht – „Bearbeiten“ einschalten, um etwas zu ändern"}</span>
         <span id="b-save" class="hinweis"></span>
         <span id="b-status" class="hinweis"></span>
       </div>`;
@@ -388,7 +398,8 @@
     if (!ansichtGesetzt) { zeigeAktuelleGeneration(); ansichtGesetzt = true; }
     else zeichneAnsicht();
     aktualisiereWerkzeug();
-    if (fehlend) speichereAllePositionen();
+    boardAenderungenAnzeigen();
+    if (speicherStand) zeigeSpeicherstand(speicherStand, true);
   }
 
   function zeichneAnsicht() {
@@ -492,7 +503,8 @@
               font-family="Segoe UI,sans-serif">${jahresText(p)}</text>
         <text x="10" y="55" font-size="9.5" fill="#7c2d12"
               font-family="Segoe UI,sans-serif">${esc((p.rolle || "").slice(0, 30))}</text>
-        <circle class="griff" cx="${BOX_B / 2}" cy="${BOX_H}" r="7" fill="#7c2d12"/>
+        ${boardModus === "bearbeiten"
+          ? `<circle class="griff" cx="${BOX_B / 2}" cy="${BOX_H}" r="7" fill="#7c2d12"/>` : ""}
       </g>`;
     }).join("");
   }
@@ -521,8 +533,10 @@
           pfad = `M ${a.x + BOX_B / 2} ${a.y + BOX_H / 2} L ${b.x + BOX_B / 2} ${b.y + BOX_H / 2}`;
         }
         teile.push(`<path d="${pfad}" fill="none" stroke="#7c2d12" stroke-width="1.7"/>`);
-        teile.push(`<path d="${pfad}" fill="none" stroke="transparent" stroke-width="14"
-          class="treffer" data-art="ehe" data-a="${p.id}" data-b="${pid}"><title>Ehe-Verbindung löschen</title></path>`);
+        if (boardModus === "bearbeiten") {
+          teile.push(`<path d="${pfad}" fill="none" stroke="transparent" stroke-width="14"
+            class="treffer" data-art="ehe" data-a="${p.id}" data-b="${pid}"><title>Ehe-Verbindung löschen</title></path>`);
+        }
       });
     });
 
@@ -538,8 +552,10 @@
       const bus = vonY + Math.max(14, (zuY - vonY) / 2);
       const pfad = `M ${vonX} ${vonY} L ${vonX} ${bus} L ${zuX} ${bus} L ${zuX} ${zuY}`;
       teile.push(`<path d="${pfad}" fill="none" stroke="#bcae95" stroke-width="1.5"/>`);
-      teile.push(`<path d="${pfad}" fill="none" stroke="transparent" stroke-width="14"
-        class="treffer" data-art="kind" data-kind="${kind.id}"><title>Eltern-Verbindung löschen</title></path>`);
+      if (boardModus === "bearbeiten") {
+        teile.push(`<path d="${pfad}" fill="none" stroke="transparent" stroke-width="14"
+          class="treffer" data-art="kind" data-kind="${kind.id}"><title>Eltern-Verbindung löschen</title></path>`);
+      }
     });
 
     if (verbinden) {
@@ -562,10 +578,19 @@
 
     svg.addEventListener("pointerdown", ev => {
       const treffer = ev.target.closest(".treffer");
-      if (treffer) return;                       // Linienklick = löschen, nicht ziehen
       const griff = ev.target.closest(".griff");
       const kasten = ev.target.closest(".box");
-      if (griff && kasten) {
+
+      if (boardModus !== "bearbeiten") {
+        // Ansicht: keine Änderungen möglich, nur Blättern und Akte öffnen
+        if (kasten) {
+          zeigeBereich("baum");
+          zeigePerson(kasten.dataset.id);
+          return;
+        }
+      } else if (treffer) {
+        return;                                 // Linienklick = löschen, nicht ziehen
+      } else if (griff && kasten) {
         const id = kasten.dataset.id;
         const p = positionen[id];
         const punkt = weltPunkt(ev);
@@ -574,8 +599,7 @@
         zeichneLinien();
         ev.preventDefault();
         return;
-      }
-      if (kasten) {
+      } else if (kasten) {
         const id = kasten.dataset.id;
         const punkt = weltPunkt(ev);
         ziehen = { id, dx: punkt.x - positionen[id].x, dy: punkt.y - positionen[id].y, bewegt: false };
@@ -653,12 +677,14 @@
     }, { passive: false });
 
     svg.addEventListener("dblclick", ev => {
+      if (boardModus !== "bearbeiten") return;
       if (ev.target.closest(".box") || ev.target.closest(".treffer")) return;
       const punkt = weltPunkt(ev);
       starteEntwurf(Math.round(punkt.x), Math.round(punkt.y));
     });
 
     svg.addEventListener("contextmenu", ev => {
+      if (boardModus !== "bearbeiten") return;
       const kasten = ev.target.closest(".box");
       if (!kasten) return;
       ev.preventDefault();
@@ -673,142 +699,111 @@
     aktualisiereWerkzeug();
   }
 
-  async function rueckgaengig() {
+  function rueckgaengig() {
     const eintrag = verlauf.pop();
     if (!eintrag) { meldung("nichts mehr rückgängig zu machen"); return; }
     const gegen = [];
-    try {
-      for (const schritt of eintrag.schritte) {
-        if (!schritt.loeschen) {
-          const person = byId[schritt.id];
-          const alt = {};
-          for (const feld of Object.keys(schritt.felder || {})) {
-            alt[feld] = person && person[feld] !== undefined ? person[feld] : null;
-          }
-          gegen.push({ id: schritt.id, felder: alt });
-        }
-        await sendeAPI(schritt);
-        if (schritt.loeschen) {
-          const index = DATA.personen.findIndex(p => p.id === schritt.loeschen);
-          if (index >= 0) DATA.personen.splice(index, 1);
-          delete byId[schritt.loeschen];
-          delete positionen[schritt.loeschen];
-        } else if (byId[schritt.id]) {
-          Object.assign(byId[schritt.id], schritt.felder);
-        }
+    const hatLoeschen = eintrag.schritte.some(s => s.loeschen);
+    for (const schritt of eintrag.schritte) {
+      if (schritt.loeschen) {
+        if (byId[schritt.loeschen]) anwendenLoeschen(schritt.loeschen);
+        continue;
       }
-      const hatLoeschen = eintrag.schritte.some(s => s.loeschen);
-      if (gegen.length && !hatLoeschen) redoStapel.push({ text: eintrag.text, schritte: gegen });
-      neuRechnen();
-      neuZeichnen();
-      baueGrafik();
-      meldung("rückgängig: " + eintrag.text);
-    } catch (fehler) {
-      meldung("Rückgängig fehlgeschlagen: " + fehler.message);
+      const person = byId[schritt.id];
+      const alt = {};
+      for (const feld of Object.keys(schritt.felder || {})) {
+        alt[feld] = person && person[feld] !== undefined ? person[feld] : null;
+      }
+      anwenden(schritt.id, schritt.felder);
+      gegen.push({ id: schritt.id, felder: alt });
     }
+    if (gegen.length && !hatLoeschen) redoStapel.push({ text: eintrag.text, schritte: gegen });
+    neuRechnen();
+    neuZeichnen();
+    baueGrafik();
+    meldung("rückgängig: " + eintrag.text);
   }
 
-  async function wiederholen() {
+  function wiederholen() {
     const eintrag = redoStapel.pop();
     if (!eintrag) { meldung("nichts zu wiederholen"); return; }
     const gegen = [];
-    try {
-      for (const schritt of eintrag.schritte) {
-        const person = byId[schritt.id];
-        const alt = {};
-        for (const feld of Object.keys(schritt.felder || {})) {
-          alt[feld] = person && person[feld] !== undefined ? person[feld] : null;
-        }
-        gegen.push({ id: schritt.id, felder: alt });
-        await sendeAPI(schritt);
-        if (byId[schritt.id]) Object.assign(byId[schritt.id], schritt.felder);
+    for (const schritt of eintrag.schritte) {
+      const person = byId[schritt.id];
+      const alt = {};
+      for (const feld of Object.keys(schritt.felder || {})) {
+        alt[feld] = person && person[feld] !== undefined ? person[feld] : null;
       }
-      if (gegen.length) verlauf.push({ text: eintrag.text, schritte: gegen });
+      anwenden(schritt.id, schritt.felder);
+      gegen.push({ id: schritt.id, felder: alt });
+    }
+    if (gegen.length) verlauf.push({ text: eintrag.text, schritte: gegen });
+    neuRechnen();
+    neuZeichnen();
+    baueGrafik();
+    meldung("wiederholt: " + eintrag.text);
+  }
+
+  function verknuepfe(vonId, zuId) {
+    const von = byId[vonId], zu = byId[zuId];
+    if (!von || !zu) return;
+    const alteVon = [...(von.partner || [])];
+    const alteZuPartner = [...(zu.partner || [])];
+    const alteZuEltern = [...(zu.eltern || [])];
+
+    if (modus === "ehe") {
+      const partnerVon = [...new Set([...alteVon, zuId])];
+      const partnerZu = [...new Set([...alteZuPartner, vonId])];
+      anwenden(vonId, { partner: partnerVon });
+      anwenden(zuId, { partner: partnerZu });
+      merke(`${von.name} ⇄ ${zu.name} verheiratet`, [
+        { id: vonId, felder: { partner: alteVon } },
+        { id: zuId, felder: { partner: alteZuPartner } }]);
       neuRechnen();
       neuZeichnen();
       baueGrafik();
-      meldung("wiederholt: " + eintrag.text);
-    } catch (fehler) {
-      meldung("Wiederholen fehlgeschlagen: " + fehler.message);
-    }
-  }
-
-  async function verknuepfe(vonId, zuId) {
-    const von = byId[vonId], zu = byId[zuId];
-    const alteVon = { partner: [...(von.partner || [])] };
-    const alteZu = { partner: [...(zu.partner || [])], eltern: [...(zu.eltern || [])] };
-    try {
-      if (modus === "ehe") {
-        const partnerVon = new Set(von.partner || []); partnerVon.add(zuId);
-        const partnerZu = new Set(zu.partner || []); partnerZu.add(vonId);
-        await sendeAPI({ id: vonId, felder: { partner: [...partnerVon] } });
-        await sendeAPI({ id: zuId, felder: { partner: [...partnerZu] } });
-        Object.assign(von, { partner: [...partnerVon], web: true });
-        Object.assign(zu, { partner: [...partnerZu], web: true });
-        merke(`${von.name} ⇄ ${zu.name} verheiratet`,
-              [{ id: vonId, felder: alteVon }, { id: zuId, felder: { partner: alteZu.partner } }]);
-        neuRechnen();
-        neuZeichnen();
-        baueGrafik();
-        meldung(`${von.name} ⇄ ${zu.name} verheiratet`);
-      } else {
-        const partner = (von.partner || []).find(pid => byId[pid]) || null;
-        const eltern = partner ? [vonId, partner] : [vonId];
-        await sendeAPI({ id: zuId, felder: { eltern } });
-        zu.eltern = eltern;
-        zu.web = true;
-        merke(`${zu.name} ← Eltern ${von.name}`,
-              [{ id: zuId, felder: { eltern: alteZu.eltern } }]);
-        neuRechnen();
-        neuZeichnen();
-        baueGrafik();
-        meldung(`${zu.name} ist jetzt Kind von ${von.name}`);
-      }
-    } catch (fehler) {
-      meldung("Nicht verknüpft: " + fehler.message);
+      meldung(`${von.name} ⇄ ${zu.name} verheiratet – noch nicht gespeichert`);
+    } else {
+      const partner = (von.partner || []).find(pid => byId[pid]) || null;
+      const eltern = partner ? [vonId, partner] : [vonId];
+      anwenden(zuId, { eltern });
+      merke(`${zu.name} ← Eltern ${von.name}`, [{ id: zuId, felder: { eltern: alteZuEltern } }]);
+      neuRechnen();
+      neuZeichnen();
+      baueGrafik();
+      meldung(`${zu.name} ist jetzt Kind von ${von.name} – noch nicht gespeichert`);
     }
   }
 
   /* Verbindung löschen - per Klick auf die Linie */
-  async function loescheVerbindung(daten) {
+  function loescheVerbindung(daten) {
     if (daten.art === "ehe") {
       const a = byId[daten.a], b = byId[daten.b];
       if (!a || !b) return;
       if (!confirm(`Ehe-Verbindung ${a.name} ⇄ ${b.name} löschen?`)) return;
       const altA = [...(a.partner || [])], altB = [...(b.partner || [])];
-      const neuA = altA.filter(x => x !== b.id);
-      const neuB = altB.filter(x => x !== a.id);
-      try {
-        await sendeAPI({ id: a.id, felder: { partner: neuA } });
-        await sendeAPI({ id: b.id, felder: { partner: neuB } });
-        Object.assign(a, { partner: neuA, web: true });
-        Object.assign(b, { partner: neuB, web: true });
-        merke(`Ehe ${a.name} ⇄ ${b.name} gelöscht`,
-              [{ id: a.id, felder: { partner: altA } }, { id: b.id, felder: { partner: altB } }]);
-        neuRechnen(); neuZeichnen(); baueGrafik();
-        meldung(`Ehe-Verbindung ${a.name} ⇄ ${b.name} gelöscht`);
-      } catch (fehler) { meldung("Nicht gelöscht: " + fehler.message); }
+      anwenden(a.id, { partner: altA.filter(x => x !== b.id) });
+      anwenden(b.id, { partner: altB.filter(x => x !== a.id) });
+      merke(`Ehe ${a.name} ⇄ ${b.name} gelöscht`,
+            [{ id: a.id, felder: { partner: altA } }, { id: b.id, felder: { partner: altB } }]);
+      neuRechnen(); neuZeichnen(); baueGrafik();
+      meldung(`Ehe-Verbindung ${a.name} ⇄ ${b.name} gelöscht – noch nicht gespeichert`);
       return;
     }
 
-    // art = "kind": Eltern des Kindes entfernen
     const kind = byId[daten.kind];
     if (!kind) return;
     const alt = [...(kind.eltern || [])];
     if (!alt.length) return;
     const namen = alt.map(e => byId[e]?.name || e).join(" und ");
     if (!confirm(`Eltern-Verbindung löschen: ${kind.name} ist nicht mehr Kind von ${namen}?`)) return;
-    try {
-      await sendeAPI({ id: kind.id, felder: { eltern: [] } });
-      kind.eltern = [];
-      kind.web = true;
-      merke(`Eltern von ${kind.name} gelöst`, [{ id: kind.id, felder: { eltern: alt } }]);
-      neuRechnen(); neuZeichnen(); baueGrafik();
-      meldung(`Eltern-Verbindung von ${kind.name} gelöscht`);
-    } catch (fehler) { meldung("Nicht gelöscht: " + fehler.message); }
+    anwenden(kind.id, { eltern: [] });
+    merke(`Eltern von ${kind.name} gelöst`, [{ id: kind.id, felder: { eltern: alt } }]);
+    neuRechnen(); neuZeichnen(); baueGrafik();
+    meldung(`Eltern-Verbindung von ${kind.name} gelöst – noch nicht gespeichert`);
   }
 
-  async function neuePersonBei(x, y, name, optionen = {}) {
+  function neuePersonBei(x, y, name, optionen = {}) {
     const id = "web_" + Date.now().toString(36);
     const teile = String(name || "").trim().split(/\s+/).filter(Boolean);
     const vorname = teile[0] || "Neu";
@@ -823,39 +818,26 @@
       belegt: "Angabe über die Webseite",
       pos_x: Math.round(x), pos_y: Math.round(y),
     };
-    try {
-      await sendeAPI({ id, felder });
-      const neu = Object.assign({ id, generation: 0 }, felder, { web: true });
-      DATA.personen.push(neu);
-      byId[id] = neu;
-      positionen[id] = { x: felder.pos_x, y: felder.pos_y };
 
-      // Partner zusätzlich auf der Gegenseite eintragen
-      let rueckPartner = null;
-      if (optionen.partnerVon && byId[optionen.partnerVon]) {
-        const anderer = byId[optionen.partnerVon];
-        rueckPartner = [...(anderer.partner || [])];
-        const partnerListe = [...new Set([...rueckPartner, id])];
-        await sendeAPI({ id: anderer.id, felder: { partner: partnerListe } });
-        anderer.partner = partnerListe;
-        anderer.web = true;
-        neu.partner = [anderer.id];
-      }
+    const neu = Object.assign({ id, generation: 0 }, felder, { web: true });
+    DATA.personen.push(neu);
+    byId[id] = neu;
+    positionen[id] = { x: felder.pos_x, y: felder.pos_y };
+    offene.set(id, { ...felder });
+    neuIds.add(id);
 
-      const rueckschritte = [{ loeschen: id }];
-      if (rueckPartner) {
-        rueckschritte.push({ id: optionen.partnerVon, felder: { partner: rueckPartner } });
-      }
-      merke(`neue Person ${felder.name}`, rueckschritte);
-      neuRechnen();
-      neuZeichnen();
-      baueGrafik();
-      meldung(`${felder.name} angelegt`);
-      return neu;
-    } catch (fehler) {
-      alert("Konnte nicht angelegt werden: " + fehler.message);
-      return null;
+    if (partnerVon) {
+      const anderer = byId[partnerVon];
+      const altePartner = [...(anderer.partner || [])];
+      anwenden(partnerVon, { partner: [...new Set([...altePartner, id])] });
     }
+
+    merke(`neue Person ${felder.name}`, [{ loeschen: id }]);
+    neuRechnen();
+    neuZeichnen();
+    baueGrafik();
+    meldung(`${felder.name} angelegt – noch nicht gespeichert`);
+    return neu;
   }
 
   /* ---------- Namenseingabe direkt auf dem Board ---------- */
@@ -912,7 +894,118 @@
     entwurf = null;
   }
 
-  /* ---------- Kontextmenü ---------- */
+  /* ---------- Bearbeiten-Modus: Änderungen erst sammeln, dann speichern ---------- */
+  let boardModus = "ansicht";        // "ansicht" = geschützt, "bearbeiten" = änderbar
+  const offene = new Map();          // id -> {geänderte Felder}, noch nicht gespeichert
+  const neuIds = new Set();          // lokal angelegt, noch nie auf dem Server
+  let schnappschuss = null;          // Stand beim Betreten des Bearbeiten-Modus
+
+  const SNAP_FELDER = ["name", "vorname", "nachname", "jahr", "jahr_bis", "datum", "ort",
+                       "rolle", "notiz", "belegt", "offen", "eltern", "partner",
+                       "pos_x", "pos_y", "web"];
+
+  function schnappschussMachen() {
+    schnappschuss = {
+      personen: JSON.parse(JSON.stringify(DATA.personen)),
+      positionen: JSON.parse(JSON.stringify(positionen)),
+    };
+  }
+
+  /* nur lokal anwenden + als offene Änderung vormerken (kein Server-Zugriff) */
+  function anwenden(id, felder) {
+    const person = byId[id];
+    if (person) Object.assign(person, felder, { web: true });
+    offene.set(id, { ...(offene.get(id) || {}), ...felder });
+    boardAenderungenAnzeigen();
+  }
+
+  function anwendenLoeschen(id) {
+    const index = DATA.personen.findIndex(p => p.id === id);
+    if (index >= 0) DATA.personen.splice(index, 1);
+    delete byId[id];
+    delete positionen[id];
+    offene.delete(id);
+    neuIds.delete(id);
+    boardAenderungenAnzeigen();
+  }
+
+  function boardAenderungenAnzeigen() {
+    const knopf = document.getElementById("b-speichern");
+    const weg = document.getElementById("b-verwerfen");
+    const info = document.getElementById("b-offen");
+    const anzahl = offene.size;
+    if (knopf) {
+      knopf.disabled = !anzahl;
+      knopf.textContent = anzahl ? `⤓ Speichern (${anzahl})` : "⤓ Speichern";
+      knopf.style.opacity = anzahl ? "1" : ".45";
+    }
+    if (weg) {
+      weg.disabled = !anzahl;
+      weg.style.opacity = anzahl ? "1" : ".45";
+    }
+    if (info) {
+      info.textContent = anzahl
+        ? `${anzahl} Änderung${anzahl === 1 ? "" : "en"} noch nicht gespeichert`
+        : (boardModus === "bearbeiten" ? "keine offenen Änderungen" : "");
+      info.style.color = anzahl ? "#9a6a12" : "#6d6355";
+    }
+  }
+
+  async function boardSpeichern() {
+    if (!offene.size) { meldung("keine Änderungen zu speichern"); return; }
+    let fehler = 0;
+    const reihenfolge = [...offene.keys()];
+    for (const id of reihenfolge) {
+      try {
+        await sendeAPI({ id, felder: offene.get(id) });
+        offene.delete(id);
+        neuIds.delete(id);
+      } catch (e) {
+        fehler += 1;
+      }
+    }
+    if (fehler) {
+      meldung(`${fehler} Änderung(en) nicht gespeichert – bitte erneut versuchen`);
+    } else {
+      schnappschussMachen();
+      meldung("Board gespeichert");
+    }
+    boardAenderungenAnzeigen();
+    neuRechnen();
+    neuZeichnen();
+  }
+
+  function boardVerwerfen() {
+    if (!schnappschuss) { meldung("kein Zwischenstand vorhanden"); return; }
+    if (offene.size && !confirm(`${offene.size} nicht gespeicherte Änderung(en) verwerfen?`)) return;
+    DATA.personen.length = 0;
+    JSON.parse(JSON.stringify(schnappschuss.personen)).forEach(p => DATA.personen.push(p));
+    Object.keys(positionen).forEach(k => delete positionen[k]);
+    Object.assign(positionen, JSON.parse(JSON.stringify(schnappschuss.positionen)));
+    offene.clear();
+    neuIds.clear();
+    if (typeof indexNeu === "function") indexNeu();
+    neuRechnen();
+    neuZeichnen();
+    boardAenderungenAnzeigen();
+    meldung("Änderungen verworfen");
+  }
+
+  function setzeBoardModus(modus) {
+    if (modus === boardModus) return;
+    if (modus === "ansicht" && offene.size) {
+      const antwort = confirm(`${offene.size} nicht gespeicherte Änderung(en) speichern?\n` +
+        "OK = speichern, Abbrechen = weiter bearbeiten");
+      if (antwort) { boardSpeichern(); }
+      else return;
+    }
+    boardModus = modus;
+    if (modus === "bearbeiten" && !offene.size) schnappschussMachen();
+    baueGrafik();
+    meldung(modus === "bearbeiten"
+      ? "Bearbeiten aktiv – Änderungen mit „Speichern“ übernehmen"
+      : "Ansicht – Board ist gegen versehentliche Änderungen geschützt");
+  }
   function zeigeKontextmenue(ev, id) {
     schliesseKontextmenue();
     const person = byId[id];
@@ -954,12 +1047,10 @@
         if (aktion === "eltern-loesen") {
           if (!confirm(`Eltern-Verbindung von ${person.name} lösen?`)) return;
           const alt = [...(person.eltern || [])];
-          await sendeAPI({ id, felder: { eltern: [] } });
-          person.eltern = [];
-          person.web = true;
+          anwenden(id, { eltern: [] });
           merke(`Eltern von ${person.name} gelöst`, [{ id, felder: { eltern: alt } }]);
           neuRechnen(); neuZeichnen(); baueGrafik();
-          meldung(`Eltern-Verbindung von ${person.name} gelöst`);
+          meldung(`Eltern-Verbindung von ${person.name} gelöst – noch nicht gespeichert`);
         }
       });
     });
@@ -969,18 +1060,17 @@
     document.getElementById("kontextmenue")?.remove();
   }
 
-  async function speicherePosition(id) {
+  function speicherePosition(id) {
     const pos = positionen[id];
     if (!pos) return;
-    try {
-      await sendeAPI({ id, felder: { pos_x: Math.round(pos.x), pos_y: Math.round(pos.y) } });
-      if (byId[id]) Object.assign(byId[id], { pos_x: Math.round(pos.x), pos_y: Math.round(pos.y) });
-    } catch (fehler) { console.warn("Position nicht gespeichert:", fehler); }
+    anwenden(id, { pos_x: Math.round(pos.x), pos_y: Math.round(pos.y) });
   }
 
   function speichereAllePositionen() {
     DATA.personen.forEach(p => {
-      if (positionen[p.id] && (p.pos_x == null || p.pos_y == null)) speicherePosition(p.id);
+      if (positionen[p.id]) {
+        anwenden(p.id, { pos_x: Math.round(positionen[p.id].x), pos_y: Math.round(positionen[p.id].y) });
+      }
     });
   }
 
@@ -1390,6 +1480,9 @@
         modus = id === "b-modus-kind" ? "kind" : "ehe";
         baueGrafik();
       }
+      if (id === "b-modus") setzeBoardModus(boardModus === "bearbeiten" ? "ansicht" : "bearbeiten");
+      if (id === "b-speichern") boardSpeichern();
+      if (id === "b-verwerfen") boardVerwerfen();
       if (id === "b-undo") rueckgaengig();
       if (id === "b-redo") wiederholen();
       if (id === "b-raster") {
@@ -1435,6 +1528,13 @@
         if (document.getElementById("kontextmenue")) { schliesseKontextmenue(); return; }
         if (entwurf) { beendeEntwurf(); return; }
         if (verbinden) { verbinden = null; zeichneLinien(); meldung("Verknüpfen abgebrochen"); }
+      }
+    });
+
+    window.addEventListener("beforeunload", ev => {
+      if (offene.size) {
+        ev.preventDefault();
+        ev.returnValue = "";
       }
     });
 
