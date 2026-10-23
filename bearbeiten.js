@@ -69,9 +69,13 @@
     }
     const ueber = webDaten.personen || {};
     Object.entries(ueber).forEach(([id, felder]) => {
+      // Reine Board-Positionen sind keine inhaltliche Änderung -> nicht als "geändert" markieren
+      const nurPosition = Object.keys(felder).every(k => k === "pos_x" || k === "pos_y");
       const person = byId[id];
-      if (person) Object.assign(person, felder, { web: true });
-      else {
+      if (person) {
+        Object.assign(person, felder);
+        if (!nurPosition) person.web = true;
+      } else {
         const neu = Object.assign({ id, generation: 0 }, felder, { web: true });
         DATA.personen.push(neu);
         byId[id] = neu;
